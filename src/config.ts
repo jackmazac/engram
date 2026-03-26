@@ -77,7 +77,7 @@ const memorySearch = z.object({
 })
 
 const backfillCfg = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   lookbackDays: z.number().int().positive().default(90),
 })
 
@@ -164,7 +164,7 @@ export const defaultEngramConfig = EngramConfig.parse({
     forgetPatternMaxRows: 500,
   },
   backfill: {
-    enabled: false,
+    enabled: true,
     lookbackDays: 90,
   },
 })
