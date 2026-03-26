@@ -1,47 +1,96 @@
-# @opencode-ai/engram
+# Engram
 
-OpenCode plugin: sidecar `memory.db` (FTS5 + embedding blobs + cosine retrieval), capture from session events, `memory` / `forget` / `stats` tools, optional proactive `<project_memory>` injection, background archive export, and a standalone CLI for archive maintenance.
+OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, cosine retrieval, RRF merge, optional LLM rerank. It captures session text and tool traces, exposes **`memory`**, **`forget`**, and **`stats`** tools, can inject **`<project_memory>`** into the system prompt, and ships a small **`engram`** CLI for archive export and maintenance.
 
-## Config
+**Repository:** [github.com/jackmazac/engram](https://github.com/jackmazac/engram)
 
-`.opencode/engram.jsonc` in the **worktree** (merged over built-in defaults). See your `OVERVIEW.md` in the Engram plugin docs for the full field list.
+## Requirements
 
-- **OpenAI**: `OPENAI_API_KEY` or `openaiApiKey` in config.
-- **Hot DB** (archive / backfill): defaults to OpenCode data dir + `opencode.db`; override with `archive.hotDbPath`.
+- [Bun](https://bun.sh) (runtime and tests)
+- An **OpenAI API key** (or compatible usage) for embeddings, classification batches, and rerank when enabled
+
+## Install (OpenCode)
+
+Use a **`file://`** URL to the plugin entry (OpenCode imports it directly; no publish step required):
+
+```json
+{
+  "plugin": [
+    "file:///Users/you/Developer/engram/src/index.ts"
+  ]
+}
+```
+
+Adjust the path to your clone. Restart OpenCode after changing `plugin`.
+
+Per **worktree**, optional overrides live in **`.opencode/engram.jsonc`** (or `engram.json`), merged on top of built-in defaults. The schema is defined in [`src/config.ts`](src/config.ts) (`defaultEngramConfig`).
+
+## API key
+
+Resolution order (see [`src/openai.ts`](src/openai.ts)):
+
+1. `openaiApiKey` in `engram.jsonc`
+2. Environment variable **`OPENAI_API_KEY`**
+3. **macOS Keychain** — generic password: service **`OPENAI_KEYCHAIN_SERVICE`** (default `OPENAI_API_KEY`), optional account **`OPENAI_KEYCHAIN_ACCOUNT`**
+
+Example Keychain item:
+
+```bash
+security add-generic-password -s OPENAI_API_KEY -a default -w "sk-..."
+```
+
+## Tools
+
+| Tool | Purpose |
+|------|---------|
+| `memory` | Search memory (FTS + vector + merge; optional rerank). |
+| `forget` | Drop chunks matching a pattern / scope (see config limits). |
+| `stats` | Sidecar stats (counts, embedding health, etc.). |
 
 ## CLI (`engram`)
 
-From this repo: `bunx` / `bun run ./src/cli/run.ts`, or link the `engram` bin from `package.json`.
+From a clone of this repo:
 
 ```bash
+bun install
 export ENGRAM_PROJECT_ID=<uuid-from-opencode-project-table>
-# or pass --project-id <uuid>
+# optional: --project-id <uuid>
 
-engram archive list --worktree /path/to/project
-engram archive export <rootSessionId> [--force] --worktree /path/to/project
-engram archive export-stale --worktree /path/to/project
-engram archive verify <rootSessionId> --worktree /path/to/project
-engram archive delete [--vacuum] <rootSessionId> ... --worktree /path/to/project
+bun run ./src/cli/run.ts archive list --worktree /path/to/project
+bun run ./src/cli/run.ts archive export <rootSessionId> [--force] --worktree /path/to/project
+bun run ./src/cli/run.ts archive export-stale --worktree /path/to/project
+bun run ./src/cli/run.ts archive verify <rootSessionId> --worktree /path/to/project
+bun run ./src/cli/run.ts archive delete [--vacuum] <rootSessionId> ... --worktree /path/to/project
 ```
 
-`archive delete` requires a passing `verify` first. Use a **copy** of production `opencode.db` until you trust the workflow.
+`archive delete` expects a prior successful **`verify`**. Practice on a **copy** of `opencode.db` until you trust the flow.
 
-## Manual validation
+The [`package.json`](package.json) `"bin"` field exposes the same entry as the `engram` command if you `bun link` or install the package locally.
 
-1. Point OpenCode `plugin` at this package’s built entry (or `src/index.ts` via `file://`).
-2. Send an assistant turn; confirm rows in `.opencode/memory.db` (`chunk` / `chunk_fts`).
-3. Call `memory` from an agent; confirm citations and `retrieval_log`.
-4. Confirm `<project_memory>` in the system path when `proactive.enabled` is true (normal chat with `sessionID` only; Agent.generate has no `sessionID` and skips injection).
-5. Run `engram archive export` on a DB copy; gunzip JSONL; run `verify`.
+## Verify it is working
 
-## Performance targets (informative)
+1. Load the plugin via `file://`, open a project, send an assistant turn.
+2. Check **`.opencode/memory.db`** for `chunk` / `chunk_fts` rows.
+3. Invoke **`memory`** from an agent and confirm hits / `retrieval_log`.
+4. With **`proactive.enabled`**, confirm `<project_memory>` appears on normal chat sessions that carry a `sessionID` (paths without a session skip injection).
 
-- Capture enqueue should stay well under ~10 ms wall on typical dev hardware.
-- Archive export: on the order of ~5 s per 1000 messages (batched RO connections, configurable `archive.batchSize`).
+## Development
 
-Run checks from this directory only:
+Run from **this directory** (not a monorepo root):
 
 ```bash
+bun install
 bun typecheck
 bun test
 ```
+
+Tests include an **optional live** suite (`test/openai-live-nano.test.ts`) when a key resolves via env or Keychain. Performance checks use a real in-memory SQLite path in `test/perf-operations.test.ts`.
+
+## Performance (expectations)
+
+- Capture enqueue is designed to stay lightweight on typical dev hardware.
+- Archive export throughput depends on `archive.batchSize` and DB size; ballpark on the order of seconds per thousand messages is normal.
+
+## License
+
+MIT
