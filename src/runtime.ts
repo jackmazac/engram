@@ -15,6 +15,11 @@ import type { ChunkInsert } from "./types.ts"
 import { embedTexts, resolveApiKey } from "./openai.ts"
 import { classifyBatch } from "./classify.ts"
 import { formatHits, searchMemory } from "./retrieve.ts"
+import {
+  ORCHESTRATOR_HINT_BLOCK,
+  appendOrchestratorHint,
+  systemLooksInternal,
+} from "./orchestrator-hint.ts"
 
 export class EngramRuntime {
   db: Database
@@ -306,7 +311,11 @@ export class EngramRuntime {
   }
 
   async injectSystem(sessionID: string | undefined, system: string[]): Promise<void> {
-    if (!sessionID || !this.cfg.proactive.enabled) return
+    if (!sessionID) return
+    if (systemLooksInternal(system.join("\n"))) return
+    await this.applyOrchestratorHint(sessionID, system)
+
+    if (!this.cfg.proactive.enabled) return
     const key = this.key
     if (!key) return
     let seed = ""
@@ -352,6 +361,21 @@ export class EngramRuntime {
     if (!bullets.length) return
     const block = `<!-- Engram -->\n<project_memory>\nRelevant context from past sessions:\n\n${bullets.join("\n")}\n</project_memory>`
     system.push(block)
+  }
+
+  private async applyOrchestratorHint(sessionID: string, system: string[]) {
+    if (!this.cfg.hints.orchestrator) return
+    try {
+      const res = await this.input.client.session.get({
+        path: { id: sessionID },
+        query: { directory: this.input.directory },
+      })
+      const raw = res as { data?: { parentID?: string } }
+      if (raw.data?.parentID) return
+    } catch {
+      return
+    }
+    appendOrchestratorHint(system, ORCHESTRATOR_HINT_BLOCK)
   }
 
   forgetTool(opts: {

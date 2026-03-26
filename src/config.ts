@@ -81,6 +81,11 @@ const backfillCfg = z.object({
   lookbackDays: z.number().int().positive().default(90),
 })
 
+const hints = z.object({
+  /** Append a short <engram-hint> to system for root sessions only (no parentID). Like DCP, skips internal agent signatures. */
+  orchestrator: z.boolean().default(true),
+})
+
 export const EngramConfig = z.object({
   enabled: z.boolean().default(true),
   openaiApiKey: z.string().optional(),
@@ -90,6 +95,7 @@ export const EngramConfig = z.object({
   embed,
   rerank,
   proactive,
+  hints,
   archive,
   insights,
   memorySearch,
@@ -140,6 +146,9 @@ export const defaultEngramConfig = EngramConfig.parse({
     maxTokens: 2000,
     maxChunks: 5,
     skipRerank: true,
+  },
+  hints: {
+    orchestrator: true,
   },
   archive: {
     path: "~/.opencode/archives",

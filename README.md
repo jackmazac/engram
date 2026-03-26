@@ -1,6 +1,6 @@
 # Engram
 
-OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, cosine retrieval, RRF merge, optional LLM rerank. It captures session text and tool traces, exposes **`memory`**, **`forget`**, and **`stats`** tools, can inject **`<project_memory>`** into the system prompt, and ships a small **`engram`** CLI for archive export and maintenance.
+OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, cosine retrieval, RRF merge, optional LLM rerank. It captures session text and tool traces, exposes **`memory`**, **`forget`**, and **`stats`** tools, can inject **`<project_memory>`** and a light **`<engram-hint>`** for root sessions (same `experimental.chat.system.transform` hook family as [DCP](https://github.com/Tarquinen/opencode-dynamic-context-pruning)), and ships a small **`engram`** CLI for archive export and maintenance.
 
 **Repository:** [github.com/jackmazac/engram](https://github.com/jackmazac/engram)
 
@@ -38,6 +38,10 @@ Example Keychain item:
 ```bash
 security add-generic-password -s OPENAI_API_KEY -a default -w "sk-..."
 ```
+
+## Orchestrator hint
+
+With **`hints.orchestrator`** `true` (default), Engram appends a short **`<!-- Engram --><engram-hint>…`** block to the **last** entry of `system[]` on `experimental.chat.system.transform`, matching how DCP extends the system prompt. It runs only when **`session.get`** shows **no `parentID`** (skip task / child sessions). Utility prompts (title generator, conversation summarizer, etc.) are skipped. Turn off with `"hints": { "orchestrator": false }`. This is separate from **`proactive`** `<project_memory>` (which still needs an API key).
 
 ## Tools
 
