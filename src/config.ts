@@ -1,13 +1,15 @@
-import path from "node:path"
-import fs from "node:fs"
-import stripJsonComments from "strip-json-comments"
-import { z } from "zod"
+import path from "node:path";
+import fs from "node:fs";
+import stripJsonComments from "strip-json-comments";
+import { z } from "zod";
 
 const sidecar = z.object({
   path: z.string().default(".opencode/memory.db"),
-  dimensions: z.union([z.literal(256), z.literal(512), z.literal(1024), z.literal(1536)]).default(256),
+  dimensions: z
+    .union([z.literal(256), z.literal(512), z.literal(1024), z.literal(1536)])
+    .default(256),
   maxChunkLength: z.number().int().positive().default(2000),
-})
+});
 
 const capture = z.object({
   assistantText: z.boolean().default(true),
@@ -34,13 +36,13 @@ const capture = z.object({
       captureErrorToolOutput: true,
       maxToolOutputLength: 10_000,
     }),
-})
+});
 
 const classify = z.object({
   model: z.string().default("gpt-5.4-nano"),
   enabled: z.boolean().default(true),
   typeProposalThreshold: z.number().int().positive().default(10),
-})
+});
 
 const embed = z.object({
   model: z.string().default("text-embedding-3-small"),
@@ -48,20 +50,20 @@ const embed = z.object({
   intervalMs: z.number().int().positive().default(5000),
   queueMax: z.number().int().positive().default(500),
   cacheByHash: z.boolean().default(true),
-})
+});
 
 const rerank = z.object({
   model: z.string().default("gpt-5.4-nano"),
   candidates: z.number().int().positive().default(20),
   enabled: z.boolean().default(true),
-})
+});
 
 const proactive = z.object({
   enabled: z.boolean().default(true),
   maxTokens: z.number().int().positive().default(2000),
   maxChunks: z.number().int().positive().default(5),
   skipRerank: z.boolean().default(true),
-})
+});
 
 const archive = z.object({
   path: z.string().default("~/.opencode/archives"),
@@ -71,13 +73,13 @@ const archive = z.object({
   batchSize: z.number().int().positive().default(500),
   onlyWhenIdle: z.boolean().default(true),
   hotDbPath: z.string().optional(),
-})
+});
 
 const insights = z.object({
   model: z.string().default("gpt-5.4-nano"),
   cacheDays: z.number().int().positive().default(1),
   lookbackDays: z.number().int().positive().default(30),
-})
+});
 
 const memorySearch = z.object({
   recentDays: z.number().int().positive().default(7),
@@ -87,7 +89,7 @@ const memorySearch = z.object({
   kRerank: z.number().int().positive().default(20),
   scopeIncludeUnembeddedGraceHours: z.number().nonnegative().default(24),
   forgetPatternMaxRows: z.number().int().positive().default(500),
-})
+});
 
 const backfillCfg = z.object({
   enabled: z.boolean().default(true),
@@ -96,7 +98,7 @@ const backfillCfg = z.object({
   repeat: z.boolean().default(false),
   intervalMs: z.number().int().positive().default(60_000),
   startupDelayMs: z.number().int().nonnegative().default(60_000),
-})
+});
 
 const telemetry = z.object({
   enabled: z.boolean().default(true),
@@ -109,7 +111,7 @@ const telemetry = z.object({
   minLevel: z.enum(["debug", "info", "warn", "error", "fatal"]).default("info"),
   logSlowOperations: z.boolean().default(true),
   logZeroResultSearches: z.boolean().default(false),
-})
+});
 
 const integration = z.object({
   profile: z.enum(["standalone", "opencode-artifacts", "orchestrator"]).default("standalone"),
@@ -122,6 +124,8 @@ const integration = z.object({
       auditProgress: z.string().default(".opencode/audit-progress"),
       status: z.string().default(".opencode/status"),
       handoff: z.string().default(".opencode/handoff.md"),
+      lifecycle: z.string().default(".opencode/lifecycle/artifacts"),
+      concord: z.string().default(".opencode/lifecycle/artifacts/concord"),
     })
     .default({
       plans: ".opencode/plans",
@@ -131,13 +135,15 @@ const integration = z.object({
       auditProgress: ".opencode/audit-progress",
       status: ".opencode/status",
       handoff: ".opencode/handoff.md",
+      lifecycle: ".opencode/lifecycle/artifacts",
+      concord: ".opencode/lifecycle/artifacts/concord",
     }),
-})
+});
 
 const hints = z.object({
   /** Append a short <engram-hint> to system for root sessions only (no parentID). Like DCP, skips internal agent signatures. */
   orchestrator: z.boolean().default(true),
-})
+});
 
 export const EngramConfig = z.object({
   enabled: z.boolean().default(true),
@@ -155,9 +161,9 @@ export const EngramConfig = z.object({
   backfill: backfillCfg,
   telemetry,
   integration,
-})
+});
 
-export type EngramConfig = z.infer<typeof EngramConfig>
+export type EngramConfig = z.infer<typeof EngramConfig>;
 
 /** Fully-resolved defaults (use when not reading from disk). */
 export const defaultEngramConfig = EngramConfig.parse({
@@ -263,50 +269,52 @@ export const defaultEngramConfig = EngramConfig.parse({
       auditProgress: ".opencode/audit-progress",
       status: ".opencode/status",
       handoff: ".opencode/handoff.md",
+      lifecycle: ".opencode/lifecycle/artifacts",
+      concord: ".opencode/lifecycle/artifacts/concord",
     },
   },
-})
+});
 
 export function loadConfig(worktree: string): EngramConfig {
-  const p = path.join(worktree, ".opencode", "engram.jsonc")
+  const p = path.join(worktree, ".opencode", "engram.jsonc");
   if (!fs.existsSync(p)) {
-    const alt = path.join(worktree, ".opencode", "engram.json")
-    if (!fs.existsSync(alt)) return defaultEngramConfig
-    return mergeFile(alt)
+    const alt = path.join(worktree, ".opencode", "engram.json");
+    if (!fs.existsSync(alt)) return defaultEngramConfig;
+    return mergeFile(alt);
   }
-  return mergeFile(p)
+  return mergeFile(p);
 }
 
 function record(x: unknown): x is Record<string, unknown> {
-  return typeof x === "object" && x !== null && !Array.isArray(x)
+  return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
 function mergeDeep(base: unknown, patch: unknown): unknown {
-  if (patch === undefined) return base
-  if (!record(patch)) return patch
+  if (patch === undefined) return base;
+  if (!record(patch)) return patch;
   if (!record(base)) {
-    const o: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(patch)) o[k] = mergeDeep(undefined, v)
-    return o
+    const o: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) o[k] = mergeDeep(undefined, v);
+    return o;
   }
-  const o = { ...base }
+  const o = { ...base };
   for (const [k, v] of Object.entries(patch)) {
-    o[k] = mergeDeep(base[k], v)
+    o[k] = mergeDeep(base[k], v);
   }
-  return o
+  return o;
 }
 
 function mergeFile(file: string): EngramConfig {
-  const raw = fs.readFileSync(file, "utf8")
-  const json: unknown = JSON.parse(stripJsonComments(raw))
-  const merged = mergeDeep(defaultEngramConfig, json)
-  const out = EngramConfig.safeParse(merged)
-  if (!out.success) throw out.error
-  return out.data
+  const raw = fs.readFileSync(file, "utf8");
+  const json: unknown = JSON.parse(stripJsonComments(raw));
+  const merged = mergeDeep(defaultEngramConfig, json);
+  const out = EngramConfig.safeParse(merged);
+  if (!out.success) throw out.error;
+  return out.data;
 }
 
 export function expandArchivePath(home: string, cfg: EngramConfig["archive"]): string {
-  if (cfg.path.startsWith("~/")) return path.join(home, cfg.path.slice(2))
-  if (cfg.path === "~") return home
-  return cfg.path
+  if (cfg.path.startsWith("~/")) return path.join(home, cfg.path.slice(2));
+  if (cfg.path === "~") return home;
+  return cfg.path;
 }

@@ -1,7 +1,9 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
-import { z } from "zod"
+import { wrapPlugin } from "@jackmazac/opencode-host-adapter"
 import { getRuntime } from "./runtime.ts"
+
+const z = tool.schema
 
 /**
  * Bus `event` shape: `{ type, properties }` (see opencode `Bus.publish`).
@@ -109,4 +111,4 @@ export const EngramPlugin: Plugin = async (input) => {
   }
 }
 
-export default EngramPlugin
+export default wrapPlugin(EngramPlugin, { name: "engram" })

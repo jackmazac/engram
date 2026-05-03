@@ -13,6 +13,7 @@ describe("EngramPlugin", () => {
       directory: wt,
       worktree: wt,
       serverUrl: new URL("http://localhost"),
+      experimental_workspace: { register: () => {} },
       $: {} as never,
     })
     const k = Object.keys(hooks)

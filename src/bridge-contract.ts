@@ -1,4 +1,4 @@
-import { z } from "zod"
+import { z } from "zod";
 
 export const bridgeArtifactSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -40,9 +40,9 @@ export const bridgeArtifactSchema = z.discriminatedUnion("kind", [
     summary: z.string(),
     updatedAt: z.number().optional(),
   }),
-])
+]);
 
-export type BridgeArtifact = z.infer<typeof bridgeArtifactSchema>
+export type BridgeArtifact = z.infer<typeof bridgeArtifactSchema>;
 
 export const contextBundleRequestSchema = z.object({
   projectId: z.string(),
@@ -55,13 +55,21 @@ export const contextBundleRequestSchema = z.object({
     .object({
       changedFiles: z.array(z.string()).optional(),
       branch: z.string().nullable().optional(),
+      correlationId: z.string().optional(),
+      sessionId: z.string().optional(),
+      planSlug: z.string().optional(),
+      waveId: z.string().optional(),
+      agentRunId: z.string().optional(),
+      lifecycleObjectIds: z.array(z.string()).optional(),
+      artifactRefs: z.array(z.string()).optional(),
+      concordEventIds: z.array(z.string()).optional(),
     })
     .optional(),
-})
+});
 
-export type ContextBundleRequest = z.infer<typeof contextBundleRequestSchema>
+export type ContextBundleRequest = z.infer<typeof contextBundleRequestSchema>;
 
-export type ContextMode = ContextBundleRequest["mode"]
+export type ContextMode = ContextBundleRequest["mode"];
 
 export type ContextBundleSection = {
   id:
@@ -70,29 +78,29 @@ export type ContextBundleSection = {
     | "current_risks"
     | "prior_successful_paths"
     | "evidence"
-    | "suggested_next_steps"
-  title: string
+    | "suggested_next_steps";
+  title: string;
   items: Array<{
-    id: string
-    source: "chunk" | "artifact" | "root" | "distillation" | "suggestion"
-    type: string
-    title: string | null
-    sourceKind: string | null
-    authority: number
-    score: number
-    text: string
-    matchedTerms: string[]
-    reasons: string[]
-    evidenceIds: string[]
-    rootSessionId: string | null
-  }>
-}
+    id: string;
+    source: "chunk" | "artifact" | "root" | "distillation" | "suggestion";
+    type: string;
+    title: string | null;
+    sourceKind: string | null;
+    authority: number;
+    score: number;
+    text: string;
+    matchedTerms: string[];
+    reasons: string[];
+    evidenceIds: string[];
+    rootSessionId: string | null;
+  }>;
+};
 
 export type ContextBundleResponse = {
-  query: string
-  mode: ContextMode
-  generatedAt: string
-  terms: string[]
-  sections: ContextBundleSection[]
-  suggestedNextSteps: string[]
-}
+  query: string;
+  mode: ContextMode;
+  generatedAt: string;
+  terms: string[];
+  sections: ContextBundleSection[];
+  suggestedNextSteps: string[];
+};

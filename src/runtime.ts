@@ -26,6 +26,56 @@ import {
   recordMetric as insertMetric,
 } from "./telemetry.ts"
 
+type ProactiveMemoryHit = {
+  content: string
+  session_id: string
+}
+
+export async function buildProactiveMemoryBlock(opts: {
+  seed: string
+  maxChunks: number
+  maxTokens: number
+  search: () => Promise<ProactiveMemoryHit[]>
+  onOperationalFailure: (error: unknown) => void
+}): Promise<string | null> {
+  if (!opts.seed.trim()) return null
+
+  let hits: ProactiveMemoryHit[]
+  try {
+    hits = await opts.search()
+  } catch (error) {
+    if (isSqliteOperationalError(error)) {
+      opts.onOperationalFailure(error)
+      return null
+    }
+    throw error
+  }
+
+  if (hits.length === 0) return null
+  const budget = opts.maxTokens * 4
+  const bullets: string[] = []
+  let n = 0
+  for (const h of hits.slice(0, opts.maxChunks)) {
+    const line = `• ${h.content.replace(/\s+/g, " ").slice(0, 400)} [session:${h.session_id.slice(0, 8)}]`
+    if (n + line.length + 1 > budget) break
+    bullets.push(line)
+    n += line.length + 1
+  }
+  if (!bullets.length) return null
+  return `<!-- Engram -->\n<project_memory>\nRelevant context from past sessions:\n\n${bullets.join("\n")}\n</project_memory>`
+}
+
+function isSqliteOperationalError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  return (
+    message.includes("disk i/o error") ||
+    message.includes("sqlite_ioerr") ||
+    message.includes("database disk image is malformed") ||
+    message.includes("file is not a database")
+  )
+}
+
 export class EngramRuntime {
   db: Database
   cfg: EngramConfig
@@ -565,29 +615,31 @@ export class EngramRuntime {
     }
     if (!seed.trim()) return
 
-    const { hits } = await searchMemory({
-      db: this.db,
-      cfg: this.cfg,
-      projectId: this.input.project.id,
-      query: seed.slice(0, 2000),
-      scope: undefined,
-      limit: this.cfg.proactive.maxChunks,
-      key,
-      skipRerank: this.cfg.proactive.skipRerank,
+    const block = await buildProactiveMemoryBlock({
+      seed,
+      maxChunks: this.cfg.proactive.maxChunks,
+      maxTokens: this.cfg.proactive.maxTokens,
+      search: async () => {
+        const { hits } = await searchMemory({
+          db: this.db,
+          cfg: this.cfg,
+          projectId: this.input.project.id,
+          query: seed.slice(0, 2000),
+          scope: undefined,
+          limit: this.cfg.proactive.maxChunks,
+          key,
+          skipRerank: this.cfg.proactive.skipRerank,
+        })
+        return hits
+      },
+      onOperationalFailure: (error) => {
+        this.logger.error("proactive", "memory_lookup_failed", error, {
+          action: "skip_injection",
+          sidecar: sidecarPath(this.input.worktree, this.cfg),
+        })
+      },
     })
-
-    if (hits.length === 0) return
-    const budget = this.cfg.proactive.maxTokens * 4
-    const bullets: string[] = []
-    let n = 0
-    for (const h of hits) {
-      const line = `• ${h.content.replace(/\s+/g, " ").slice(0, 400)} [session:${h.session_id.slice(0, 8)}]`
-      if (n + line.length + 1 > budget) break
-      bullets.push(line)
-      n += line.length + 1
-    }
-    if (!bullets.length) return
-    const block = `<!-- Engram -->\n<project_memory>\nRelevant context from past sessions:\n\n${bullets.join("\n")}\n</project_memory>`
+    if (!block) return
     system.push(block)
   }
 

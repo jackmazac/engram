@@ -24,7 +24,8 @@
     "eval"
   ],
   "scripts": {
-    "check": "bun run typecheck && bun test --timeout 30000",
+    "check": "bun run lint:no-zod && bun run typecheck && bun test --timeout 30000",
+    "lint:no-zod": "bun run ./node_modules/@jackmazac/opencode-host-adapter/src/cli/check-no-zod-import.ts src/",
     "sprint": "bun run ./src/cli/run.ts sprint --local-only --rows 3000 --worktree .",
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000"
@@ -47,7 +48,8 @@
   ],
   "dependencies": {
     "@ai-sdk/openai": "2.0.89",
-    "@opencode-ai/plugin": "1.3.3",
+    "@jackmazac/opencode-host-adapter": "file:/Users/jack.mazac/Developer/opencode-host-adapter",
+    "@opencode-ai/plugin": "1.14.31",
     "@opencode-ai/sdk": "1.3.3",
     "ai": "5.0.124",
     "strip-json-comments": "5.0.1",
@@ -58,7 +60,6 @@
   "devDependencies": {
     "@tsconfig/bun": "1.0.9",
     "@types/bun": "1.3.11",
-    "@typescript/native-preview": "7.0.0-dev.20251207.1",
-    "typescript": "5.8.2"
+    "@typescript/native-preview": "7.0.0-dev.20251207.1"
   }
 }

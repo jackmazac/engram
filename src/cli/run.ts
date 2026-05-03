@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-import path from "node:path"
-import os from "node:os"
-import readline from "node:readline/promises"
-import { stdin as input, stdout as output } from "node:process"
+import path from "node:path";
+import os from "node:os";
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import {
   deleteSubtreeFromHot,
   exportRootSession,
@@ -13,63 +13,83 @@ import {
   searchArchive,
   staleRootIds,
   verifyArchiveFile,
-} from "../archive.ts"
-import { formatArtifactIngestSummary, ingestArtifacts } from "../artifacts.ts"
-import { buildContextBundle, formatContextBundle, type ContextMode } from "../context.ts"
-import { loadConfig, expandArchivePath } from "../config.ts"
-import { formatCurationSummary, runCuration } from "../curation.ts"
-import { buildDashboardReport, formatDashboardReport } from "../dashboard.ts"
-import { applyConnPragmas, openMemoryDb, sidecarPath } from "../db.ts"
-import { distillRoots, formatDistillSummary } from "../distill.ts"
-import { formatContextEvalReport, formatEvalReport, runContextEval, runEval } from "../eval.ts"
-import { backfillHot, formatHotBackfillSummary, type BackfillStrategy } from "../hot-backfill.ts"
-import { formatEventReport, recentLogEvents, pruneLogEvents, trimLogEvents, type LogLevel } from "../logger.ts"
-import { runMaintenance } from "../maintenance.ts"
-import { runManualSprint } from "../manual-sprint.ts"
-import { defaultHotDbPath } from "../paths.ts"
-import { buildMemoryRelations, formatRelationSummary } from "../relations.ts"
-import { formatRootIndexSummary, indexHotRoots } from "../root-index.ts"
-import { formatTelemetryReport, pruneMetrics, recentMetrics } from "../telemetry.ts"
+} from "../archive.ts";
+import { formatArtifactIngestSummary, ingestArtifacts } from "../artifacts.ts";
+import {
+  buildContextBundle,
+  formatContextBundle,
+  type ContextMode,
+  type WorkspaceSignals,
+} from "../context.ts";
+import { loadConfig, expandArchivePath } from "../config.ts";
+import { formatCurationSummary, runCuration } from "../curation.ts";
+import { buildDashboardReport, formatDashboardReport } from "../dashboard.ts";
+import { buildPluginDashboardReport, formatPluginDashboardReport } from "../plugin-dashboard.ts";
+import {
+  applyConnPragmas,
+  checkSidecarHealth,
+  openMemoryDb,
+  repairSidecar,
+  sidecarPath,
+} from "../db.ts";
+import { distillRoots, formatDistillSummary } from "../distill.ts";
+import { formatContextEvalReport, formatEvalReport, runContextEval, runEval } from "../eval.ts";
+import { buildEngramHealthReport, formatEngramHealthReport } from "../health.ts";
+import { backfillHot, formatHotBackfillSummary, type BackfillStrategy } from "../hot-backfill.ts";
+import {
+  formatEventReport,
+  recentLogEvents,
+  pruneLogEvents,
+  trimLogEvents,
+  type LogLevel,
+} from "../logger.ts";
+import { runMaintenance } from "../maintenance.ts";
+import { runManualSprint } from "../manual-sprint.ts";
+import { defaultHotDbPath } from "../paths.ts";
+import { buildMemoryRelations, formatRelationSummary } from "../relations.ts";
+import { formatRootIndexSummary, indexHotRoots } from "../root-index.ts";
+import { formatTelemetryReport, pruneMetrics, recentMetrics } from "../telemetry.ts";
 
-const repoRoot = path.resolve(import.meta.dir, "..", "..")
+const repoRoot = path.resolve(import.meta.dir, "..", "..");
 
 function worktreeFromArgs(args: string[]): string {
-  const i = args.indexOf("--worktree")
-  const w = i >= 0 ? args[i + 1] : undefined
-  if (w) return path.resolve(w)
-  return process.cwd()
+  const i = args.indexOf("--worktree");
+  const w = i >= 0 ? args[i + 1] : undefined;
+  if (w) return path.resolve(w);
+  return process.cwd();
 }
 
 function projectIdFromArgs(args: string[]): string | undefined {
-  const i = args.indexOf("--project-id")
-  if (i >= 0 && args[i + 1]) return args[i + 1]
-  return process.env.ENGRAM_PROJECT_ID
+  const i = args.indexOf("--project-id");
+  if (i >= 0 && args[i + 1]) return args[i + 1];
+  return process.env.ENGRAM_PROJECT_ID;
 }
 
 function hotPath(cfg: ReturnType<typeof loadConfig>): string {
-  return cfg.archive.hotDbPath ?? defaultHotDbPath()
+  return cfg.archive.hotDbPath ?? defaultHotDbPath();
 }
 
 function numberArg(args: string[], name: string, fallback: number): number {
-  const i = args.indexOf(name)
-  const raw = i >= 0 ? args[i + 1] : undefined
-  const n = raw ? Number(raw) : NaN
-  return Number.isFinite(n) && n > 0 ? n : fallback
+  const i = args.indexOf(name);
+  const raw = i >= 0 ? args[i + 1] : undefined;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function valueArg(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name)
-  return i >= 0 ? args[i + 1] : undefined
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
 }
 
 function levelArg(args: string[]): LogLevel | undefined {
-  const raw = valueArg(args, "--level")
-  if (raw === "debug" || raw === "info" || raw === "warn" || raw === "error" || raw === "fatal") return raw
-  return undefined
+  const raw = valueArg(args, "--level");
+  if (raw === "debug" || raw === "info" || raw === "warn" || raw === "error" || raw === "fatal")
+    return raw;
+  return undefined;
 }
 
 function modeArg(args: string[]): ContextMode {
-  const raw = valueArg(args, "--mode")
+  const raw = valueArg(args, "--mode");
   if (
     raw === "plan" ||
     raw === "implement" ||
@@ -78,8 +98,8 @@ function modeArg(args: string[]): ContextMode {
     raw === "audit" ||
     raw === "handoff"
   )
-    return raw
-  return "plan"
+    return raw;
+  return "plan";
 }
 
 function gitSignals(worktree: string): { changedFiles: string[]; branch: string | null } {
@@ -87,26 +107,64 @@ function gitSignals(worktree: string): { changedFiles: string[]; branch: string 
     cwd: worktree,
     stdout: "pipe",
     stderr: "ignore",
-  })
+  });
   const branch = Bun.spawnSync(["git", "branch", "--show-current"], {
     cwd: worktree,
     stdout: "pipe",
     stderr: "ignore",
-  })
-  const changedFiles = diff.exitCode === 0 ? new TextDecoder().decode(diff.stdout).split(/\r?\n/).filter(Boolean) : []
-  const branchName = branch.exitCode === 0 ? new TextDecoder().decode(branch.stdout).trim() || null : null
-  return { changedFiles, branch: branchName }
+  });
+  const changedFiles =
+    diff.exitCode === 0 ? new TextDecoder().decode(diff.stdout).split(/\r?\n/).filter(Boolean) : [];
+  const branchName =
+    branch.exitCode === 0 ? new TextDecoder().decode(branch.stdout).trim() || null : null;
+  return { changedFiles, branch: branchName };
+}
+
+function contextSignals(args: string[], worktree: string): WorkspaceSignals | undefined {
+  const base: WorkspaceSignals = args.includes("--from-git") ? gitSignals(worktree) : {};
+  const signals: WorkspaceSignals = {
+    ...base,
+    correlationId: valueArg(args, "--correlation-id"),
+    sessionId: valueArg(args, "--session-id"),
+    planSlug: valueArg(args, "--plan-slug"),
+    waveId: valueArg(args, "--wave-id"),
+    agentRunId: valueArg(args, "--agent-run-id"),
+    lifecycleObjectIds: repeatedArg(args, "--lifecycle-object-id"),
+    artifactRefs: repeatedArg(args, "--artifact-ref"),
+    concordEventIds: repeatedArg(args, "--concord-event-id"),
+  };
+  return Object.values(signals).some((value) =>
+    Array.isArray(value) ? value.length > 0 : Boolean(value),
+  )
+    ? signals
+    : undefined;
+}
+
+function repeatedArg(args: string[], name: string): string[] | undefined {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== name) continue;
+    const value = args[i + 1];
+    if (!value || value.startsWith("--")) continue;
+    values.push(
+      ...value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+  }
+  return values.length ? values : undefined;
 }
 
 async function confirm(question: string): Promise<boolean> {
-  const rl = readline.createInterface({ input, output })
-  const a = (await rl.question(question)).trim().toLowerCase()
-  rl.close()
-  return a === "y" || a === "yes"
+  const rl = readline.createInterface({ input, output });
+  const a = (await rl.question(question)).trim().toLowerCase();
+  rl.close();
+  return a === "y" || a === "yes";
 }
 
 async function main() {
-  const argv = process.argv.slice(2)
+  const argv = process.argv.slice(2);
   if (
     ![
       "archive",
@@ -114,12 +172,16 @@ async function main() {
       "context",
       "curate",
       "dashboard",
+      "doctor",
       "distill",
       "eval",
+      "check",
       "index-hot",
       "ingest-artifacts",
       "maintain",
+      "repair-sidecar",
       "relations",
+      "status",
       "telemetry",
       "sprint",
     ].includes(argv[0] ?? "")
@@ -135,6 +197,9 @@ async function main() {
   engram archive import-memory <rootSessionId> [--worktree DIR]
   engram archive delete [--vacuum] <rootSessionId> [<rootSessionId>...] [--worktree DIR]
   engram archive export-stale [--all] [--worktree DIR]   # export stale roots (non-destructive)
+  engram doctor [--json] [--worktree DIR]
+  engram status [--json] [--worktree DIR]
+  engram check [--json] [--worktree DIR]
   engram ingest-artifacts [--apply] [--kind journal,plan] [--max N] [--project-id ID] [--worktree DIR]
   engram index-hot [--apply] [--max N] [--project-id ID] [--worktree DIR]
   engram backfill-hot [--apply] [--strategy priority|artifact-linked|recent|errors|patches] [--max-roots N] [--max-parts N] [--project-id ID] [--worktree DIR]
@@ -146,17 +211,28 @@ async function main() {
   engram eval context --fixture FILE [--out DIR] [--query-id ID] [--sidecar] [--worktree DIR]
   engram curate [--apply] [--max N] [--project-id ID] [--worktree DIR]
   engram dashboard [--json] [--project-id ID] [--worktree DIR]
+  engram dashboard --plugins [--json]
   engram maintain [--apply] [--prune-telemetry] [--verify-archives] [--export-stale] [--compact-db] [--health-report] [--project-id ID] [--worktree DIR]
+  engram repair-sidecar [--apply] [--worktree DIR]
   engram telemetry [--events] [--json] [--level debug|info|warn|error|fatal] [--limit N] [--project-id ID] [--worktree DIR]
-  engram sprint [--rows N] [--local-only] [--rerank] [--worktree DIR]`)
-    process.exit(1)
+  engram sprint [--rows N] [--local-only] [--rerank] [--worktree DIR]`);
+    process.exit(1);
   }
 
-  const wt = worktreeFromArgs(argv)
-  const cfg = loadConfig(wt)
+  const wt = worktreeFromArgs(argv);
+  const cfg = loadConfig(wt);
+  const memoryPath = sidecarPath(wt, cfg);
+
+  if (argv[0] === "doctor" || argv[0] === "status" || argv[0] === "check") {
+    const report = buildEngramHealthReport({ cfg, worktree: wt, sidecarPath: memoryPath });
+    console.log(
+      argv.includes("--json") ? JSON.stringify(report, null, 2) : formatEngramHealthReport(report),
+    );
+    process.exit(report.status === "fail" ? 1 : 0);
+  }
 
   if (argv[0] === "sprint") {
-    const rows = numberArg(argv, "--rows", 3000)
+    const rows = numberArg(argv, "--rows", 3000);
     console.log(
       await runManualSprint({
         cfg,
@@ -164,25 +240,37 @@ async function main() {
         live: !argv.includes("--local-only"),
         rerank: argv.includes("--rerank"),
       }),
-    )
-    return
+    );
+    return;
   }
 
-  const memoryPath = sidecarPath(wt, cfg)
-  const memoryDb = openMemoryDb(memoryPath)
-  const hot = hotPath(cfg)
-  const home = os.homedir()
+  if (argv[0] === "repair-sidecar") {
+    const health = checkSidecarHealth(memoryPath);
+    const repair = repairSidecar({ path: memoryPath, dryRun: !argv.includes("--apply") });
+    console.log(`sidecar=${memoryPath}`);
+    console.log(`health=${health.ok ? "ok" : "error"}`);
+    if (!health.ok) console.log(`error=${health.error}`);
+    console.log(`dry_run=${repair.dryRun}`);
+    console.log(`repaired=${repair.repaired}`);
+    console.log(`quarantine=${repair.quarantineDir}`);
+    console.log(`files=${repair.files.length ? repair.files.join(",") : "(none)"}`);
+    return;
+  }
+
+  const memoryDb = openMemoryDb(memoryPath);
+  const hot = hotPath(cfg);
+  const home = os.homedir();
 
   if (argv[0] === "ingest-artifacts") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     const kinds = valueArg(argv, "--kind")
       ?.split(",")
       .map((x) => x.trim())
-      .filter(Boolean)
+      .filter(Boolean);
     const summary = ingestArtifacts({
       db: memoryDb,
       worktree: wt,
@@ -191,17 +279,17 @@ async function main() {
       dryRun: !argv.includes("--apply"),
       kinds,
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
-    })
-    console.log(formatArtifactIngestSummary(summary))
-    memoryDb.close()
-    return
+    });
+    console.log(formatArtifactIngestSummary(summary));
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "index-hot") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     const summary = indexHotRoots({
       db: memoryDb,
@@ -209,19 +297,19 @@ async function main() {
       projectId: pid,
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
       dryRun: !argv.includes("--apply"),
-    })
-    console.log(formatRootIndexSummary(summary))
-    memoryDb.close()
-    return
+    });
+    console.log(formatRootIndexSummary(summary));
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "backfill-hot") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
-    const strategy = (valueArg(argv, "--strategy") ?? "priority") as BackfillStrategy
+    const strategy = (valueArg(argv, "--strategy") ?? "priority") as BackfillStrategy;
     const summary = backfillHot({
       db: memoryDb,
       hotPath: hot,
@@ -231,17 +319,17 @@ async function main() {
       dryRun: !argv.includes("--apply"),
       maxRoots: numberArg(argv, "--max-roots", 10),
       maxParts: numberArg(argv, "--max-parts", 500),
-    })
-    console.log(formatHotBackfillSummary(summary))
-    memoryDb.close()
-    return
+    });
+    console.log(formatHotBackfillSummary(summary));
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "distill") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     console.log(
       formatDistillSummary(
@@ -253,16 +341,16 @@ async function main() {
           dryRun: !argv.includes("--apply"),
         }),
       ),
-    )
-    memoryDb.close()
-    return
+    );
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "relations") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     console.log(
       formatRelationSummary(
@@ -273,13 +361,13 @@ async function main() {
           max: numberArg(argv, "--max", 100),
         }),
       ),
-    )
-    memoryDb.close()
-    return
+    );
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "context") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     const query = argv.filter(
       (x, i) =>
         !x.startsWith("--") &&
@@ -287,11 +375,19 @@ async function main() {
         argv[i - 1] !== "--worktree" &&
         argv[i - 1] !== "--limit" &&
         argv[i - 1] !== "--mode" &&
-        argv[i - 1] !== "--budget",
-    )[1]
+        argv[i - 1] !== "--budget" &&
+        argv[i - 1] !== "--correlation-id" &&
+        argv[i - 1] !== "--session-id" &&
+        argv[i - 1] !== "--plan-slug" &&
+        argv[i - 1] !== "--wave-id" &&
+        argv[i - 1] !== "--agent-run-id" &&
+        argv[i - 1] !== "--lifecycle-object-id" &&
+        argv[i - 1] !== "--artifact-ref" &&
+        argv[i - 1] !== "--concord-event-id",
+    )[1];
     if (!pid || !query) {
-      console.error("Usage: engram context <query> --project-id <uuid>")
-      process.exit(1)
+      console.error("Usage: engram context <query> --project-id <uuid>");
+      process.exit(1);
     }
     const bundle = buildContextBundle({
       db: memoryDb,
@@ -300,44 +396,48 @@ async function main() {
       limit: numberArg(argv, "--limit", 12),
       mode: modeArg(argv),
       budgetChars: numberArg(argv, "--budget", 6000),
-      workspaceSignals: argv.includes("--from-git") ? gitSignals(wt) : undefined,
-    })
-    console.log(argv.includes("--json") ? JSON.stringify(bundle, null, 2) : formatContextBundle(bundle))
-    memoryDb.close()
-    return
+      workspaceSignals: contextSignals(argv, wt),
+    });
+    console.log(
+      argv.includes("--json") ? JSON.stringify(bundle, null, 2) : formatContextBundle(bundle),
+    );
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "telemetry") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
-    const limit = numberArg(argv, "--limit", 200)
-    const minLevel = levelArg(argv)
-    pruneMetrics(memoryDb, pid, cfg.telemetry.retainDays)
-    pruneLogEvents(memoryDb, pid, cfg.telemetry.eventRetainDays)
-    trimLogEvents(memoryDb, pid, cfg.telemetry.eventMaxRows)
-    const metrics = recentMetrics(memoryDb, pid, limit)
-    const events = recentLogEvents(memoryDb, pid, { limit, minLevel })
+    const limit = numberArg(argv, "--limit", 200);
+    const minLevel = levelArg(argv);
+    pruneMetrics(memoryDb, pid, cfg.telemetry.retainDays);
+    pruneLogEvents(memoryDb, pid, cfg.telemetry.eventRetainDays);
+    trimLogEvents(memoryDb, pid, cfg.telemetry.eventMaxRows);
+    const metrics = recentMetrics(memoryDb, pid, limit);
+    const events = recentLogEvents(memoryDb, pid, { limit, minLevel });
     if (argv.includes("--json")) {
-      console.log(JSON.stringify({ metrics, events }, null, 2))
+      console.log(JSON.stringify({ metrics, events }, null, 2));
     } else if (argv.includes("--events")) {
-      console.log(formatEventReport(events, "CLI"))
+      console.log(formatEventReport(events, "CLI"));
     } else {
-      console.log([formatTelemetryReport(metrics, "CLI"), formatEventReport(events, "CLI")].join("\n\n"))
+      console.log(
+        [formatTelemetryReport(metrics, "CLI"), formatEventReport(events, "CLI")].join("\n\n"),
+      );
     }
-    memoryDb.close()
-    return
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "eval") {
-    const isContextEval = argv[1] === "context"
+    const isContextEval = argv[1] === "context";
     const fixture =
       valueArg(argv, "--fixture") ??
-      path.join(repoRoot, "eval", "fixtures", isContextEval ? "context-core.json" : "core.json")
-    const outDir = valueArg(argv, "--out")
-    const queryId = valueArg(argv, "--query-id")
+      path.join(repoRoot, "eval", "fixtures", isContextEval ? "context-core.json" : "core.json");
+    const outDir = valueArg(argv, "--out");
+    const queryId = valueArg(argv, "--query-id");
     if (isContextEval) {
       const report = await runContextEval({
         fixturePath: path.resolve(fixture),
@@ -346,14 +446,14 @@ async function main() {
         memoryDb,
         queryId,
         useSidecar: argv.includes("--sidecar"),
-      })
-      console.log(formatContextEvalReport(report))
-      memoryDb.close()
-      return
+      });
+      console.log(formatContextEvalReport(report));
+      memoryDb.close();
+      return;
     }
     if (argv[1] === "query" && !queryId) {
-      console.error("Usage: engram eval query --fixture FILE --query-id ID")
-      process.exit(1)
+      console.error("Usage: engram eval query --fixture FILE --query-id ID");
+      process.exit(1);
     }
     const report = await runEval({
       fixturePath: path.resolve(fixture),
@@ -364,29 +464,41 @@ async function main() {
       live: argv.includes("--live"),
       rerank: argv.includes("--rerank"),
       useSidecar: argv.includes("--sidecar"),
-    })
-    console.log(formatEvalReport(report))
-    memoryDb.close()
-    return
+    });
+    console.log(formatEvalReport(report));
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "dashboard") {
-    const pid = projectIdFromArgs(argv)
-    if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+    if (argv.includes("--plugins")) {
+      const report = buildPluginDashboardReport();
+      console.log(
+        argv.includes("--json")
+          ? JSON.stringify(report, null, 2)
+          : formatPluginDashboardReport(report),
+      );
+      memoryDb.close();
+      return;
     }
-    const report = buildDashboardReport({ db: memoryDb, projectId: pid, cfg, worktree: wt })
-    console.log(argv.includes("--json") ? JSON.stringify(report, null, 2) : formatDashboardReport(report))
-    memoryDb.close()
-    return
+    const pid = projectIdFromArgs(argv);
+    if (!pid) {
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
+    }
+    const report = buildDashboardReport({ db: memoryDb, projectId: pid, cfg, worktree: wt });
+    console.log(
+      argv.includes("--json") ? JSON.stringify(report, null, 2) : formatDashboardReport(report),
+    );
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "maintain") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     console.log(
       await runMaintenance({
@@ -409,66 +521,73 @@ async function main() {
             argv.includes("--compact-db")
           ),
       }),
-    )
-    memoryDb.close()
-    return
+    );
+    memoryDb.close();
+    return;
   }
 
   if (argv[0] === "curate") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
     const summary = runCuration({
       db: memoryDb,
       projectId: pid,
       apply: argv.includes("--apply"),
       max: numberArg(argv, "--max", 100),
-    })
-    console.log(formatCurationSummary(summary))
-    memoryDb.close()
-    return
+    });
+    console.log(formatCurationSummary(summary));
+    memoryDb.close();
+    return;
   }
 
   const rest = argv.filter(
     (x, i) =>
-      !(argv[i - 1] === "--worktree" || x === "--worktree" || argv[i - 1] === "--project-id" || x === "--project-id"),
-  )
+      !(
+        argv[i - 1] === "--worktree" ||
+        x === "--worktree" ||
+        argv[i - 1] === "--project-id" ||
+        x === "--project-id"
+      ),
+  );
 
   if (rest[1] === "list") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID (see project table in opencode.db).")
-      process.exit(1)
+      console.error(
+        "Pass --project-id <uuid> or set ENGRAM_PROJECT_ID (see project table in opencode.db).",
+      );
+      process.exit(1);
     }
-    const rows = listArchiveRows(memoryDb, pid)
-    const archRoot = expandArchivePath(home, cfg.archive)
-    console.log(`Archive dir: ${archRoot}`)
-    console.log(`Hot db: ${hot}`)
+    const rows = listArchiveRows(memoryDb, pid);
+    const archRoot = expandArchivePath(home, cfg.archive);
+    console.log(`Archive dir: ${archRoot}`);
+    console.log(`Hot db: ${hot}`);
     for (const r of rows) {
       console.log(
         `${r.root_session_id}\tmsgs=${r.message_count}\tparts=${r.part_count}\t${r.archive_path}\t${r.content_hash.slice(0, 12)}…`,
-      )
+      );
     }
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now())
-    if (stale.length) console.log(`\nStale roots (${cfg.archive.staleDays}d): ${stale.join(", ")}`)
-    memoryDb.close()
-    return
+    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now());
+    if (stale.length) console.log(`\nStale roots (${cfg.archive.staleDays}d): ${stale.join(", ")}`);
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "export-stale") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Pass --project-id or set ENGRAM_PROJECT_ID.")
-      process.exit(1)
+      console.error("Pass --project-id or set ENGRAM_PROJECT_ID.");
+      process.exit(1);
     }
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now())
-    const roots = rest.includes("--all") ? stale : stale.slice(0, 1)
+    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now());
+    const roots = rest.includes("--all") ? stale : stale.slice(0, 1);
     if (roots.length === 0) {
-      console.log("No stale roots.")
-      memoryDb.close()
-      return
+      console.log("No stale roots.");
+      memoryDb.close();
+      return;
     }
     for (const root of roots) {
       await exportRootSession({
@@ -480,20 +599,22 @@ async function main() {
         home,
         force: false,
         onProgress: (m) => console.log(m),
-      })
+      });
     }
-    memoryDb.close()
-    return
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "export") {
-    const force = rest.includes("--force")
-    const ids = rest.slice(2).filter((x) => x !== "--force")
-    const root = ids[0]
-    const pid = projectIdFromArgs(argv)
+    const force = rest.includes("--force");
+    const ids = rest.slice(2).filter((x) => x !== "--force");
+    const root = ids[0];
+    const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive export [--force] <rootSessionId>  (requires ENGRAM_PROJECT_ID)")
-      process.exit(1)
+      console.error(
+        "Usage: engram archive export [--force] <rootSessionId>  (requires ENGRAM_PROJECT_ID)",
+      );
+      process.exit(1);
     }
     await exportRootSession({
       memoryDb,
@@ -504,79 +625,79 @@ async function main() {
       home,
       force,
       onProgress: (m) => console.log(m),
-    })
-    memoryDb.close()
-    return
+    });
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "verify") {
-    const root = rest[2]
-    const pid = projectIdFromArgs(argv)
+    const root = rest[2];
+    const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive verify <rootSessionId>")
-      process.exit(1)
+      console.error("Usage: engram archive verify <rootSessionId>");
+      process.exit(1);
     }
     const r = await verifyArchiveFile({
       memoryDb,
       archiveRoot: expandArchivePath(home, cfg.archive),
       projectId: pid,
       rootSessionId: root,
-    })
-    console.log(r.ok ? r.detail : `FAIL: ${r.detail}`)
-    memoryDb.close()
-    process.exit(r.ok ? 0 : 1)
+    });
+    console.log(r.ok ? r.detail : `FAIL: ${r.detail}`);
+    memoryDb.close();
+    process.exit(r.ok ? 0 : 1);
   }
 
   if (rest[1] === "verify-all") {
-    const pid = projectIdFromArgs(argv)
+    const pid = projectIdFromArgs(argv);
     if (!pid) {
-      console.error("Usage: engram archive verify-all (requires ENGRAM_PROJECT_ID)")
-      process.exit(1)
+      console.error("Usage: engram archive verify-all (requires ENGRAM_PROJECT_ID)");
+      process.exit(1);
     }
-    const rows = listArchiveRows(memoryDb, pid)
-    const archiveRoot = expandArchivePath(home, cfg.archive)
-    let ok = true
+    const rows = listArchiveRows(memoryDb, pid);
+    const archiveRoot = expandArchivePath(home, cfg.archive);
+    let ok = true;
     for (const row of rows) {
       const r = await verifyArchiveFile({
         memoryDb,
         archiveRoot,
         projectId: pid,
         rootSessionId: row.root_session_id,
-      })
-      console.log(`${r.ok ? "OK" : "FAIL"}\t${row.root_session_id}\t${r.detail}`)
-      if (!r.ok) ok = false
+      });
+      console.log(`${r.ok ? "OK" : "FAIL"}\t${row.root_session_id}\t${r.detail}`);
+      if (!r.ok) ok = false;
     }
-    if (rows.length === 0) console.log("No archive rows.")
-    memoryDb.close()
-    process.exit(ok ? 0 : 1)
+    if (rows.length === 0) console.log("No archive rows.");
+    memoryDb.close();
+    process.exit(ok ? 0 : 1);
   }
 
   if (rest[1] === "inspect") {
-    const root = rest[2]
-    const pid = projectIdFromArgs(argv)
+    const root = rest[2];
+    const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive inspect <rootSessionId>")
-      process.exit(1)
+      console.error("Usage: engram archive inspect <rootSessionId>");
+      process.exit(1);
     }
     const counts = await inspectArchive({
       memoryDb,
       archiveRoot: expandArchivePath(home, cfg.archive),
       projectId: pid,
       rootSessionId: root,
-    })
-    console.log(`sessions=${counts.sessions}\tmessages=${counts.messages}\tparts=${counts.parts}`)
-    memoryDb.close()
-    return
+    });
+    console.log(`sessions=${counts.sessions}\tmessages=${counts.messages}\tparts=${counts.parts}`);
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "restore") {
-    const root = rest.slice(2).find((x) => x !== "--dry-run" && x !== "--apply")
-    const pid = projectIdFromArgs(argv)
+    const root = rest.slice(2).find((x) => x !== "--dry-run" && x !== "--apply");
+    const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive restore [--apply] <rootSessionId>")
-      process.exit(1)
+      console.error("Usage: engram archive restore [--apply] <rootSessionId>");
+      process.exit(1);
     }
-    const dryRun = !rest.includes("--apply")
+    const dryRun = !rest.includes("--apply");
     const result = await restoreArchiveToHot({
       memoryDb,
       archiveRoot: expandArchivePath(home, cfg.archive),
@@ -584,21 +705,21 @@ async function main() {
       projectId: pid,
       rootSessionId: root,
       dryRun,
-    })
+    });
     console.log(
       `${dryRun ? "Would restore" : "Restored"} sessions=${result.sessions} messages=${result.messages} parts=${result.parts}`,
-    )
-    memoryDb.close()
-    return
+    );
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "search") {
-    const root = rest[2]
-    const query = rest[3]
-    const pid = projectIdFromArgs(argv)
+    const root = rest[2];
+    const query = rest[3];
+    const pid = projectIdFromArgs(argv);
     if (!root || !query || !pid) {
-      console.error("Usage: engram archive search <rootSessionId> <query>")
-      process.exit(1)
+      console.error("Usage: engram archive search <rootSessionId> <query>");
+      process.exit(1);
     }
     const rows = await searchArchive({
       memoryDb,
@@ -607,18 +728,18 @@ async function main() {
       rootSessionId: root,
       query,
       limit: numberArg(argv, "--limit", 20),
-    })
-    console.log(rows.length ? rows.join("\n") : "No archive matches.")
-    memoryDb.close()
-    return
+    });
+    console.log(rows.length ? rows.join("\n") : "No archive matches.");
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "import-memory") {
-    const root = rest[2]
-    const pid = projectIdFromArgs(argv)
+    const root = rest[2];
+    const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive import-memory <rootSessionId>")
-      process.exit(1)
+      console.error("Usage: engram archive import-memory <rootSessionId>");
+      process.exit(1);
     }
     const result = await importArchiveToMemory({
       memoryDb,
@@ -626,19 +747,19 @@ async function main() {
       projectId: pid,
       rootSessionId: root,
       cfg,
-    })
-    console.log(`Imported ${result.inserted} chunks from ${result.scannedParts} archived parts.`)
-    memoryDb.close()
-    return
+    });
+    console.log(`Imported ${result.inserted} chunks from ${result.scannedParts} archived parts.`);
+    memoryDb.close();
+    return;
   }
 
   if (rest[1] === "delete") {
-    const vacuum = rest.includes("--vacuum")
-    const ids = rest.slice(2).filter((x) => x !== "--vacuum")
-    const pid = projectIdFromArgs(argv)
+    const vacuum = rest.includes("--vacuum");
+    const ids = rest.slice(2).filter((x) => x !== "--vacuum");
+    const pid = projectIdFromArgs(argv);
     if (!ids.length || !pid) {
-      console.error("Usage: engram archive delete [--vacuum] <rootSessionId> ...")
-      process.exit(1)
+      console.error("Usage: engram archive delete [--vacuum] <rootSessionId> ...");
+      process.exit(1);
     }
     for (const root of ids) {
       const v = await verifyArchiveFile({
@@ -646,16 +767,16 @@ async function main() {
         archiveRoot: expandArchivePath(home, cfg.archive),
         projectId: pid,
         rootSessionId: root,
-      })
+      });
       if (!v.ok) {
-        console.error(`Refusing ${root}: archive not verified (${v.detail})`)
-        process.exit(1)
+        console.error(`Refusing ${root}: archive not verified (${v.detail})`);
+        process.exit(1);
       }
     }
     if (!(await confirm(`Delete ${ids.length} session tree(s) from ${hot}? Type yes: `))) {
-      console.log("Aborted.")
-      memoryDb.close()
-      return
+      console.log("Aborted.");
+      memoryDb.close();
+      return;
     }
     for (const root of ids) {
       deleteSubtreeFromHot({
@@ -663,26 +784,26 @@ async function main() {
         projectId: pid,
         rootSessionId: root,
         vacuum: false,
-      })
-      console.log(`Deleted tree ${root}`)
+      });
+      console.log(`Deleted tree ${root}`);
     }
     if (vacuum) {
-      const { Database } = await import("bun:sqlite")
-      const d = new Database(hot)
-      applyConnPragmas(d)
-      d.run("VACUUM")
-      d.close()
-      console.log("VACUUM complete.")
+      const { Database } = await import("bun:sqlite");
+      const d = new Database(hot);
+      applyConnPragmas(d);
+      d.run("VACUUM");
+      d.close();
+      console.log("VACUUM complete.");
     }
-    memoryDb.close()
-    return
+    memoryDb.close();
+    return;
   }
 
-  console.error(`Unknown subcommand: ${rest[1]}`)
-  process.exit(1)
+  console.error(`Unknown subcommand: ${rest[1]}`);
+  process.exit(1);
 }
 
 main().catch((e) => {
-  console.error(e)
-  process.exit(1)
-})
+  console.error(e);
+  process.exit(1);
+});

@@ -1,31 +1,41 @@
-import { createHash } from "node:crypto"
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import path from "node:path"
-import type { Database } from "bun:sqlite"
-import { ulid } from "ulid"
-import type { EngramConfig } from "./config.ts"
-import { contentHash } from "./hash.ts"
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import type { Database } from "bun:sqlite";
+import { ulid } from "ulid";
+import type { EngramConfig } from "./config.ts";
+import { contentHash } from "./hash.ts";
 
-export type ArtifactKind = "journal" | "plan" | "audit" | "progress" | "audit_progress" | "status" | "handoff"
+export type ArtifactKind =
+  | "journal"
+  | "plan"
+  | "audit"
+  | "progress"
+  | "audit_progress"
+  | "status"
+  | "handoff"
+  | "lifecycle"
+  | "concord_collision"
+  | "concord_guidance";
 
 export type ArtifactIngestSummary = {
-  runId: string
-  dryRun: boolean
-  discovered: number
-  sourcesChanged: number
-  items: number
-  chunksInserted: number
-  errors: string[]
-}
+  runId: string;
+  dryRun: boolean;
+  discovered: number;
+  sourcesChanged: number;
+  items: number;
+  chunksInserted: number;
+  errors: string[];
+};
 
-type Source = { kind: ArtifactKind; file: string; rel: string }
+type Source = { kind: ArtifactKind; file: string; rel: string };
 type Item = {
-  kind: ArtifactKind
-  title: string | null
-  slug: string | null
-  content: string
-  time: number
-}
+  kind: ArtifactKind;
+  title: string | null;
+  slug: string | null;
+  content: string;
+  time: number;
+};
 
 const authority: Record<ArtifactKind, number> = {
   journal: 10,
@@ -33,55 +43,58 @@ const authority: Record<ArtifactKind, number> = {
   audit: 8,
   progress: 7,
   audit_progress: 7,
+  lifecycle: 8,
+  concord_collision: 8,
+  concord_guidance: 8,
   handoff: 6,
   status: 3,
-}
+};
 
 export function ingestArtifacts(opts: {
-  db: Database
-  worktree: string
-  projectId: string
-  cfg: EngramConfig
-  dryRun: boolean
-  kinds?: string[]
-  max?: number
+  db: Database;
+  worktree: string;
+  projectId: string;
+  cfg: EngramConfig;
+  dryRun: boolean;
+  kinds?: string[];
+  max?: number;
 }): ArtifactIngestSummary {
-  const runId = ulid()
+  const runId = ulid();
   const sources = discoverSources(opts.worktree, opts.cfg).filter(
     (s) => !opts.kinds?.length || opts.kinds.includes(s.kind),
-  )
-  const errors: string[] = []
-  let sourcesChanged = 0
-  let items = 0
-  let chunksInserted = 0
-  const max = opts.max ?? Number.POSITIVE_INFINITY
+  );
+  const errors: string[] = [];
+  let sourcesChanged = 0;
+  let items = 0;
+  let chunksInserted = 0;
+  const max = opts.max ?? Number.POSITIVE_INFINITY;
 
   const sourceRows: Array<{
-    source: Source
-    hash: string
-    mtime: number
-    size: number
-    parsed: Item[]
-  }> = []
+    source: Source;
+    hash: string;
+    mtime: number;
+    size: number;
+    parsed: Item[];
+  }> = [];
   for (const source of sources.slice(0, max)) {
     try {
-      const st = statSync(source.file)
-      const raw = readFileSync(source.file, "utf8")
-      const hash = sha256(raw)
+      const st = statSync(source.file);
+      const raw = readFileSync(source.file, "utf8");
+      const hash = sha256(raw);
       const existing = opts.db
         .prepare(`SELECT content_hash FROM artifact_source WHERE project_id = ? AND path = ?`)
-        .get(opts.projectId, source.rel) as { content_hash: string } | undefined
-      const parsed = parseSource(source, raw, st.mtimeMs)
-      sourceRows.push({ source, hash, mtime: Math.floor(st.mtimeMs), size: st.size, parsed })
-      if (existing?.content_hash !== hash) sourcesChanged++
-      items += parsed.length
+        .get(opts.projectId, source.rel) as { content_hash: string } | undefined;
+      const parsed = parseSource(source, raw, st.mtimeMs);
+      sourceRows.push({ source, hash, mtime: Math.floor(st.mtimeMs), size: st.size, parsed });
+      if (existing?.content_hash !== hash) sourcesChanged++;
+      items += parsed.length;
     } catch (e) {
-      errors.push(`${source.rel}: ${e instanceof Error ? e.message : String(e)}`)
+      errors.push(`${source.rel}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   if (!opts.dryRun) {
-    const now = Date.now()
+    const now = Date.now();
     const upsertSource = opts.db.prepare(
       `INSERT INTO artifact_source (id, project_id, kind, path, content_hash, mtime_ms, size_bytes, last_ingested_at)
        VALUES (?,?,?,?,?,?,?,?)
@@ -91,14 +104,18 @@ export function ingestArtifacts(opts: {
          mtime_ms = excluded.mtime_ms,
          size_bytes = excluded.size_bytes,
          last_ingested_at = excluded.last_ingested_at`,
-    )
-    const getSource = opts.db.prepare(`SELECT id FROM artifact_source WHERE project_id = ? AND path = ?`)
+    );
+    const getSource = opts.db.prepare(
+      `SELECT id FROM artifact_source WHERE project_id = ? AND path = ?`,
+    );
     const insertItem = opts.db.prepare(
       `INSERT OR IGNORE INTO artifact_item (
         id, source_id, project_id, kind, title, slug, content, content_hash, authority, time_created, time_updated
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-    const existingChunk = opts.db.prepare(`SELECT 1 FROM chunk WHERE project_id = ? AND source_ref = ? LIMIT 1`)
+    );
+    const existingChunk = opts.db.prepare(
+      `SELECT 1 FROM chunk WHERE project_id = ? AND source_ref = ? LIMIT 1`,
+    );
     const insertChunk = opts.db.prepare(
       `INSERT INTO chunk (
         id, session_id, message_id, part_id, project_id, role, agent, model, content_type, content,
@@ -106,15 +123,24 @@ export function ingestArtifacts(opts: {
         time_created, content_hash, root_session_id, session_depth, plan_slug,
         source_kind, source_ref, authority
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
+    );
     const tx = opts.db.transaction(() => {
       for (const row of sourceRows) {
-        upsertSource.run(ulid(), opts.projectId, row.source.kind, row.source.rel, row.hash, row.mtime, row.size, now)
-        const src = getSource.get(opts.projectId, row.source.rel) as { id: string } | undefined
-        if (!src) continue
+        upsertSource.run(
+          ulid(),
+          opts.projectId,
+          row.source.kind,
+          row.source.rel,
+          row.hash,
+          row.mtime,
+          row.size,
+          now,
+        );
+        const src = getSource.get(opts.projectId, row.source.rel) as { id: string } | undefined;
+        if (!src) continue;
         for (const item of row.parsed) {
-          const h = contentHash(item.content)
-          const ref = `artifact:${row.source.rel}:${h}`
+          const h = contentHash(item.content);
+          const ref = `artifact:${row.source.rel}:${h}`;
           insertItem.run(
             ulid(),
             src.id,
@@ -127,8 +153,8 @@ export function ingestArtifacts(opts: {
             authority[item.kind],
             item.time,
             now,
-          )
-          if (existingChunk.get(opts.projectId, ref)) continue
+          );
+          if (existingChunk.get(opts.projectId, ref)) continue;
           insertChunk.run(
             ulid(),
             `artifact:${item.kind}`,
@@ -155,8 +181,8 @@ export function ingestArtifacts(opts: {
             item.kind,
             ref,
             authority[item.kind],
-          )
-          chunksInserted++
+          );
+          chunksInserted++;
         }
       }
       opts.db
@@ -170,9 +196,9 @@ export function ingestArtifacts(opts: {
           0,
           JSON.stringify({ sources: sourceRows.length, items, chunksInserted, errors }),
           now,
-        )
-    })
-    tx()
+        );
+    });
+    tx();
   }
 
   return {
@@ -183,20 +209,21 @@ export function ingestArtifacts(opts: {
     items,
     chunksInserted,
     errors,
-  }
+  };
 }
 
 export function formatArtifactIngestSummary(s: ArtifactIngestSummary): string {
   const lines = [
     `Artifact ingest ${s.dryRun ? "dry-run" : "applied"} ${s.runId}`,
     `discovered=${s.discovered} changed=${s.sourcesChanged} items=${s.items} chunksInserted=${s.chunksInserted}`,
-  ]
-  for (const e of s.errors.slice(0, 10)) lines.push(`error: ${e}`)
-  return lines.join("\n")
+  ];
+  for (const e of s.errors.slice(0, 10)) lines.push(`error: ${e}`);
+  return lines.join("\n");
 }
 
 export function discoverSources(worktree: string, cfg: EngramConfig): Source[] {
-  const p = cfg.integration.artifactPaths
+  const p = cfg.integration.artifactPaths;
+  const concordRel = normalizeRel(p.concord);
   return [
     ...walkKind(worktree, p.plans, "plan", [".md"]),
     ...walkKind(worktree, p.audits, "audit", [".md"]),
@@ -205,33 +232,88 @@ export function discoverSources(worktree: string, cfg: EngramConfig): Source[] {
     ...walkKind(worktree, p.auditProgress, "audit_progress", [".json"]),
     ...walkKind(worktree, p.status, "status", [".json"]),
     ...fileKind(worktree, p.handoff, "handoff"),
-  ]
+    ...walkKind(worktree, p.lifecycle, "lifecycle", [".json", ".md"]).filter(
+      (source) => !normalizeRel(source.rel).startsWith(`${concordRel}/`),
+    ),
+    ...walkKind(worktree, p.concord, "concord_collision", [".json"]),
+    ...walkKind(worktree, p.concord, "concord_guidance", [".xml", ".md"]),
+  ];
+}
+
+function normalizeRel(rel: string): string {
+  return rel.replace(/^\.\//, "").replace(/\\/g, "/");
 }
 
 function parseSource(source: Source, raw: string, mtime: number): Item[] {
-  if (source.kind === "journal") return parseJournal(raw, mtime)
-  const title = firstTitle(raw) ?? path.basename(source.rel)
-  const slug = path.basename(source.rel).replace(/\.[^.]+$/, "")
-  return [{ kind: source.kind, title, slug, content: raw.trim(), time: Math.floor(mtime) }].filter((x) => x.content)
+  if (source.kind === "journal") return parseJournal(raw, mtime);
+  if (source.kind === "lifecycle" || source.kind === "concord_collision") {
+    return [parseStructuredArtifact(source, raw, mtime)].filter((x) => x.content);
+  }
+  const title = firstTitle(raw) ?? path.basename(source.rel);
+  const slug = path.basename(source.rel).replace(/\.[^.]+$/, "");
+  return [{ kind: source.kind, title, slug, content: raw.trim(), time: Math.floor(mtime) }].filter(
+    (x) => x.content,
+  );
+}
+
+function parseStructuredArtifact(source: Source, raw: string, mtime: number): Item {
+  const fallbackTitle = firstTitle(raw) ?? path.basename(source.rel);
+  const slug = path.basename(source.rel).replace(/\.[^.]+$/, "");
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const eventId =
+      typeof parsed.event_id === "string"
+        ? parsed.event_id
+        : typeof parsed.eventId === "string"
+          ? parsed.eventId
+          : undefined;
+    const kind = typeof parsed.kind === "string" ? parsed.kind : source.kind;
+    const filePath =
+      typeof parsed.file_path === "string"
+        ? parsed.file_path
+        : typeof parsed.filePath === "string"
+          ? parsed.filePath
+          : undefined;
+    const title = [kind, eventId, filePath].filter(Boolean).join(" ") || fallbackTitle;
+    return {
+      kind: source.kind,
+      title,
+      slug: eventId ?? slug,
+      content: JSON.stringify(parsed, null, 2),
+      time: typeof parsed.ts === "number" ? parsed.ts : Math.floor(mtime),
+    };
+  } catch {
+    return {
+      kind: source.kind,
+      title: fallbackTitle,
+      slug,
+      content: raw.trim(),
+      time: Math.floor(mtime),
+    };
+  }
 }
 
 function parseJournal(raw: string, mtime: number): Item[] {
-  const out: Item[] = []
+  const out: Item[] = [];
   for (const line of raw.split(/\r?\n/)) {
-    const t = line.trim()
-    if (!t) continue
+    const t = line.trim();
+    if (!t) continue;
     try {
-      const row = JSON.parse(t) as Record<string, unknown>
+      const row = JSON.parse(t) as Record<string, unknown>;
       const body =
-        typeof row.content === "string" ? row.content : typeof row.body === "string" ? row.body : JSON.stringify(row)
-      const type = typeof row.type === "string" ? row.type : "journal"
+        typeof row.content === "string"
+          ? row.content
+          : typeof row.body === "string"
+            ? row.body
+            : JSON.stringify(row);
+      const type = typeof row.type === "string" ? row.type : "journal";
       out.push({
         kind: "journal",
         title: type,
         slug: type,
         content: body,
         time: typeof row.time === "number" ? row.time : Math.floor(mtime),
-      })
+      });
     } catch {
       out.push({
         kind: "journal",
@@ -239,55 +321,59 @@ function parseJournal(raw: string, mtime: number): Item[] {
         slug: "journal",
         content: t,
         time: Math.floor(mtime),
-      })
+      });
     }
   }
-  return out
+  return out;
 }
 
 function contentType(kind: ArtifactKind, content: string): string {
   if (kind === "journal") {
-    const t = content.toLowerCase()
-    if (t.includes("contract")) return "api_contract"
-    if (t.includes("decision")) return "decision"
-    if (t.includes("pattern")) return "pattern"
-    return "decision"
+    const t = content.toLowerCase();
+    if (t.includes("contract")) return "api_contract";
+    if (t.includes("decision")) return "decision";
+    if (t.includes("pattern")) return "pattern";
+    return "decision";
   }
-  if (kind === "audit") return content.toLowerCase().includes("bug") ? "bug" : "analysis"
-  if (kind === "plan") return "plan"
-  if (kind === "progress" || kind === "audit_progress") return "milestone"
-  return "discovery"
+  if (kind === "audit") return content.toLowerCase().includes("bug") ? "bug" : "analysis";
+  if (kind === "plan") return "plan";
+  if (kind === "progress" || kind === "audit_progress") return "milestone";
+  if (kind === "lifecycle") return "lifecycle_artifact";
+  if (kind === "concord_collision") return "concord_collision";
+  if (kind === "concord_guidance") return "concord_guidance";
+  return "discovery";
 }
 
 function walkKind(worktree: string, rel: string, kind: ArtifactKind, exts: string[]): Source[] {
-  const root = path.join(worktree, rel)
-  if (!existsSync(root)) return []
-  const out: Source[] = []
+  const root = path.join(worktree, rel);
+  if (!existsSync(root)) return [];
+  const out: Source[] = [];
   const walk = (dir: string) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
-      const file = path.join(dir, ent.name)
-      if (ent.isDirectory()) walk(file)
-      else if (exts.includes(path.extname(ent.name))) out.push({ kind, file, rel: path.relative(worktree, file) })
+      const file = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(file);
+      else if (exts.includes(path.extname(ent.name)))
+        out.push({ kind, file, rel: path.relative(worktree, file) });
     }
-  }
-  walk(root)
-  return out
+  };
+  walk(root);
+  return out;
 }
 
 function fileKind(worktree: string, rel: string, kind: ArtifactKind): Source[] {
-  const file = path.join(worktree, rel)
-  return existsSync(file) ? [{ kind, file, rel }] : []
+  const file = path.join(worktree, rel);
+  return existsSync(file) ? [{ kind, file, rel }] : [];
 }
 
 function firstTitle(raw: string): string | null {
   for (const line of raw.split(/\r?\n/).slice(0, 20)) {
-    const t = line.trim()
-    if (t.startsWith("#")) return t.replace(/^#+\s*/, "")
-    if (t) return t.slice(0, 120)
+    const t = line.trim();
+    if (t.startsWith("#")) return t.replace(/^#+\s*/, "");
+    if (t) return t.slice(0, 120);
   }
-  return null
+  return null;
 }
 
 function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex")
+  return createHash("sha256").update(s).digest("hex");
 }

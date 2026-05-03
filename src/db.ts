@@ -1,4 +1,5 @@
 import path from "node:path"
+import { existsSync, mkdirSync, renameSync } from "node:fs"
 import { Database } from "bun:sqlite"
 import type { EngramConfig } from "./config.ts"
 
@@ -23,6 +24,80 @@ export function openMemoryDb(file: string): Database {
   applySidecarPragmas(db)
   migrate(db)
   return db
+}
+
+export type SidecarHealth =
+  | { ok: true }
+  | {
+      ok: false
+      error: string
+    }
+
+export type SidecarRepairResult = {
+  repaired: boolean
+  dryRun: boolean
+  path: string
+  quarantineDir: string
+  files: string[]
+}
+
+export function checkSidecarHealth(file: string): SidecarHealth {
+  if (!existsSync(file)) return { ok: false, error: `Sidecar does not exist: ${file}` }
+
+  let db: Database | undefined
+  try {
+    db = new Database(file)
+    applyConnPragmas(db)
+    db.exec("PRAGMA quick_check;")
+    db.exec("SELECT count(*) FROM sqlite_schema;")
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    db?.close()
+  }
+}
+
+export function repairSidecar(opts: { path: string; dryRun?: boolean }): SidecarRepairResult {
+  const dryRun = opts.dryRun !== false
+  const files = sidecarFiles(opts.path).filter((file) => existsSync(file))
+  const quarantineDir = path.join(path.dirname(opts.path), `.memory-quarantine-${repairTimestamp()}`)
+
+  if (dryRun) {
+    return {
+      repaired: false,
+      dryRun,
+      path: opts.path,
+      quarantineDir,
+      files,
+    }
+  }
+
+  if (files.length > 0) {
+    mkdirSync(quarantineDir, { recursive: true })
+    for (const file of files) {
+      renameSync(file, path.join(quarantineDir, path.basename(file)))
+    }
+  }
+
+  const db = openMemoryDb(opts.path)
+  db.close()
+
+  return {
+    repaired: true,
+    dryRun,
+    path: opts.path,
+    quarantineDir,
+    files,
+  }
+}
+
+function sidecarFiles(file: string): string[] {
+  return [file, `${file}-wal`, `${file}-shm`]
+}
+
+function repairTimestamp(): string {
+  return new Date().toISOString().replace(/[^0-9]/g, "")
 }
 
 function migrate(db: Database) {
