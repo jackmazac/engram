@@ -9,21 +9,25 @@ Engram is a standalone OpenCode plugin and CLI for local project memory. It turn
 Engram owns local engineering memory:
 
 - Capture and backfill from OpenCode sessions.
-- Sidecar SQLite schema and migrations.
-- Hybrid memory search.
-- Context compilation through `memory_context` and `engram context`.
+- Sidecar SQLite schema and migrations, including the `chunk_correlation` fleet correlation table.
+- Hybrid memory search (FTS + streaming vector + RRF + optional rerank).
+- Context compilation through `memory_context` and `engram context` (passive by default).
+- Fleet correlation retrieval through `conflict_context` (native plugin tool, Wave 3).
+- Artifact ingestion through `lifecycle_ingest` (native plugin tool, Wave 3) and `engram ingest-artifacts` CLI.
 - Eval fixtures and drift reports.
 - Telemetry and event logging.
 - Archive export, verify, restore, search, and import-memory workflows.
-- Artifact ingest from generic `.opencode` plans, audits, journals, progress, status, and handoff files.
+- Artifact ingest from generic `.opencode` plans, audits, journals, progress, status, handoff, and lifecycle/concord files.
 - Root-session indexing, deterministic distillation, relation/supersession graph, curation, and maintenance.
 
-Engram does not own orchestration:
+Engram does not own orchestration or fleet control:
 
-- Agent definitions.
-- Delegation policy.
+- Agent definitions or delegation policy.
 - Planner/executor/reviewer/scribe prompts.
-- Conductor/Orchestrator workflow rules.
+- Conductor/Orchestrator workflow rules and lifecycle decisions.
+- Live edit coordination and conflict resolution (Concord).
+- Code-graph truth, drift detection, API-surface advice (Codemem).
+- Fleet install, update, and opencode.json generation (opencode-fleet).
 - Global OpenCode config layout.
 
 Conductor integration must stay optional and contract-based. Use `src/bridge-contract.ts` and artifact files; do not hardcode `/Users/jack.mazac/.config/opencode/prompts` or any local prompt path into Engram behavior.
@@ -38,6 +42,8 @@ Conductor integration must stay optional and contract-based. Use `src/bridge-con
 - Dashboard remains CLI/TUI/JSON only. Do not add a browser dashboard.
 - Privacy/capture policy should be structural and cheap. Avoid broad regex sweeps over large outputs in hot paths.
 - Mutating CLI workflows must be dry-run by default unless already documented as safe.
+- `memory_context` is passive by default. Do not re-enable proactive injection in default config. The `context.proactiveHints.enabled` gate must be respected throughout the codebase.
+- Embeddings, classification, and rerank require an OpenAI API key. All local-only paths (`conflict_context`, `lifecycle_ingest`, `forget`, `stats`, `memory` without rerank) must remain fully functional without one.
 
 ## Repository Map
 
@@ -105,6 +111,111 @@ Supported modes:
 Every context item should include a useful `why` explanation. Keep this debuggable and deterministic.
 
 Do not reintroduce query expansion unless the user explicitly approves it. The prior approval excluded rank 8 query expansion, rank 9 context cache, and rank 10 additional raw backfill.
+
+## Fleet Correlation (chunk_correlation Sidecar)
+
+Wave 3 adds a nullable sidecar table `chunk_correlation` in `src/db.ts`. It attaches fleet IDs to chunks without widening the hot write path:
+
+| Column               | Type    | Index |
+| -------------------- | ------- | ----- |
+| `chunk_id`           | TEXT PK | —     |
+| `workspace_id`       | TEXT    | yes   |
+| `plan_id`            | TEXT    | yes   |
+| `wave_id`            | TEXT    | yes   |
+| `agent_run_id`       | TEXT    | yes   |
+| `correlation_id`     | TEXT    | yes   |
+| `tool_call_id`       | TEXT    | yes   |
+| `spine_seq`          | INTEGER | yes   |
+| `artifact_ref`       | TEXT    | yes   |
+| `lifecycle_object_id`| TEXT    | yes   |
+
+All columns are nullable. A missing row means the chunk pre-dates correlation tracking; it is still valid. Rows are written by `upsertChunkCorrelation` in `src/db.ts` during new captures and artifact ingestion when a valid fleet context is present.
+
+To query by fleet IDs directly in SQLite:
+
+```sql
+SELECT c.* FROM chunk c
+JOIN chunk_correlation cc ON cc.chunk_id = c.id
+WHERE cc.plan_id = 'fleet-correlation' AND cc.wave_id = 'W3';
+```
+
+**Schema rules for this table**: additive-only; new columns must be nullable and use `ALTER TABLE … ADD COLUMN … IF NOT EXISTS` in a new migration block; never widen the hot write path.
+
+## Passivity Default (W3.5)
+
+`memory_context` and `engram context` are **passive by default**. They return an evidence bundle and nothing else:
+
+- No `suggestedNextSteps` field.
+- No `<engram-hint>…</engram-hint>` injection into the system prompt.
+- No `<project_memory>…</project_memory>` injection.
+
+To re-enable proactive injection, set in `.opencode/engram.jsonc`:
+
+```json
+{
+  "context": {
+    "proactiveHints": {
+      "enabled": true
+    }
+  }
+}
+```
+
+The `config.context.proactiveHints.enabled` flag is defined in `src/config.ts`. Regression tests must verify that the default (flag absent or `false`) produces no `suggestedNextSteps` and no injected blocks. Do not introduce any code path that emits hints outside this gate.
+
+## Native Plugin Tool Pattern
+
+`conflict_context` and `lifecycle_ingest` are the reference examples for adding a native plugin tool (as opposed to a CLI command). The pattern in `src/index.ts`:
+
+1. Define the Zod input schema inline or import it from the relevant source module.
+2. Call `tool({ description, parameters, execute })` — `execute` receives the validated args and the OpenCode context object.
+3. Register the tool in the `tools` map returned by the plugin's `create` function.
+4. Do not shell out to other fleet plugins from inside `execute`. Call internal Engram functions directly.
+5. Add a contract test in `test/plugin-contract.test.ts` that asserts the tool is exported and its schema accepts/rejects expected shapes.
+
+For retrieval-backed tools, call `hybridSearch` (or the relevant pipeline function in `src/retrieve.ts`) directly; do not re-implement retrieval logic in the tool handler.
+
+## Extending Retrieval Ranking
+
+To add a new ranking signal:
+
+1. Add the signal computation to `src/retrieve.ts` (the `scoreChunk` function or a post-merge pass).
+2. Update `RRFResult` in `src/retrieve.ts` if the signal needs to be surfaced to callers.
+3. Add or update a retrieval fixture in `eval/fixtures/` that exercises the new signal.
+4. Run `bun run ./src/cli/run.ts eval run --fixture eval/fixtures/core.json --worktree .` and confirm 100%.
+5. Add a unit test in `test/` that verifies the signal is applied correctly for edge cases.
+
+Do not add ranking signals that require an OpenAI call in the hot retrieval path. OpenAI rerank is a post-retrieval optional step gated by `retrieval.rerank`.
+
+## Adding a New Artifact Kind
+
+Artifact kinds are inferred from file path and metadata in `src/artifacts.ts`. To add a new kind:
+
+1. Update the kind-detection logic in `src/artifacts.ts`.
+2. Update `ArtifactKind` type if one is defined.
+3. Add a fixture entry in an existing or new eval fixture that exercises the new kind.
+4. Update `test/learning-modules.test.ts` to cover ingest behavior for the new kind.
+
+The contracts package defines which artifact kinds fleet tools emit; Engram infers kind from file metadata. Do not hardcode absolute `.opencode/` paths into artifact detection; use the `worktree` parameter to anchor lookups.
+
+## Canonical Contracts Boundary
+
+`src/bridge-contract.ts` and the `@jackmazac/opencode-fleet-contracts` package are the canonical shared types for fleet integration. When `conflict_context` or `lifecycle_ingest` decode an incoming `FleetContext` object:
+
+- Decode at the plugin boundary (in the tool `execute` handler), not deep in internal functions.
+- Use the Zod schema from `bridge-contract.ts` or the contracts package — do not redefine the shape.
+- Internal Engram functions should receive already-decoded, narrowed types — not raw `unknown`.
+- One decode boundary per tool; no mapper hops after that point.
+
+## What Agents Do NOT Do Here
+
+- Do not implement orchestration policy, delegation rules, or multi-agent workflow logic in Engram. Those belong in Conductor.
+- Do not make lifecycle decisions (approve plans, assign tasks, route work). Engram stores and retrieves; it does not decide.
+- Do not shell out or call other fleet plugins from inside Engram plugin tool handlers. Use native function calls.
+- Do not break retention defaults (14d metrics / 14d events / 5000 event rows) without explicit user approval. Pruning is user-initiated.
+- Do not widen the hot write path for correlation IDs. Use the `chunk_correlation` sidecar table.
+- Do not add a browser-based dashboard. Dashboard is CLI/TUI/JSON only.
+- Do not add `sqlite-vec` or a second vector backend without a full eval/telemetry justification and explicit user approval.
 
 ## Eval Rules
 
@@ -179,13 +290,13 @@ bun run ./src/cli/run.ts eval context --sidecar --fixture "$WT/.opencode/engram-
 Run from the repo root:
 
 ```bash
-bun run typecheck
+bun run check
+bun run smoke:runtime
 git diff --check
-bun test --timeout 30000
 npm pack --dry-run
 ```
 
-For changed eval/context behavior, also run:
+`bun run check` runs lint, typecheck, and the full test suite. `bun run smoke:runtime` exercises the live plugin runtime path against an in-memory sidecar without OpenAI. For changed eval/context behavior, also run:
 
 ```bash
 bun run ./src/cli/run.ts eval run --fixture eval/fixtures/core.json --worktree .
@@ -208,11 +319,11 @@ Important test files:
 | ------------------------------- | ----------------------------------------------------------------------- |
 | `test/eval.test.ts`             | Retrieval/context evals and sidecar-backed eval behavior.               |
 | `test/learning-modules.test.ts` | Artifact ingest, context, root index, hot backfill, distill, relations. |
-| `test/db-fts.test.ts`           | Migrations and FTS behavior.                                            |
+| `test/db-fts.test.ts`           | Migrations and FTS behavior; includes `chunk_correlation` table checks. |
 | `test/telemetry.test.ts`        | Metrics and event logging.                                              |
 | `test/capture-policy.test.ts`   | Structural capture policy.                                              |
 | `test/startup.test.ts`          | Startup/backfill scheduling defaults.                                   |
-| `test/plugin-contract.test.ts`  | OpenCode tool surface.                                                  |
+| `test/plugin-contract.test.ts`  | OpenCode tool surface; asserts all 7 tools are exported.                |
 
 ## Packaging Rules
 
@@ -238,13 +349,14 @@ git push https://github.com/jackmazac/opencode-engram.git HEAD:main
 
 The separate orchestration package scaffold is `/Users/jack.mazac/Developer/opencode-conductor`.
 
-Conductor should consume Engram through:
+Conductor and other fleet plugins consume Engram through:
 
-- OpenCode tools such as `memory_context`.
-- Artifact files that Engram can ingest.
+- Native plugin tools: `conflict_context` and `lifecycle_ingest` are registered tools callable from any agent that loads the Engram plugin.
+- OpenCode tools such as `memory_context`, `memory`, `memory_feedback`, and `stats`.
+- Artifact files that Engram can ingest via `lifecycle_ingest` or `engram ingest-artifacts`.
 - Types and schemas from `opencode-engram/bridge`.
 
-Do not move Conductor prompt logic or multi-agent workflow policy into Engram.
+Do not move Conductor prompt logic or multi-agent workflow policy into Engram. Do not shell out to Engram from Conductor — use the native tool dispatch path.
 
 ## Working Principles
 

@@ -63,6 +63,16 @@ Wave 3 adds a nullable sidecar table, **`chunk_correlation`**, instead of wideni
 
 `memory_context` and `engram context` now default to evidence-only output: no `suggestedNextSteps`, no `<engram-hint>`, and no `<project_memory>` unless `context.proactiveHints.enabled=true`.
 
+## Fleet integration
+
+Conductor and other fleet plugins call `conflict_context` and `lifecycle_ingest` as native plugin tools — no shell invocation, no file parsing at the call site. Both tools are registered in `src/index.ts` and run in the same plugin process as all other Engram tools.
+
+`conflict_context` accepts any combination of `plan_slug`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `artifact_refs`, `lifecycle_object_ids`, and `concord_event_ids`. It resolves the corresponding `chunk_correlation` rows, retrieves the associated chunks via the standard hybrid pipeline, and returns a bounded evidence bundle in the same shape as `memory_context`.
+
+`lifecycle_ingest` accepts the same glob/path arguments as `engram ingest-artifacts`. By default it is a dry-run (`dry_run: true`); set `dry_run: false` to apply. It returns `{ applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids }`.
+
+Neither tool calls OpenAI unless the embedding/rerank path is explicitly configured with an API key — the correlation filter and artifact ingest paths are fully local.
+
 ## Agent Skill
 
 Engram ships an optional OpenCode skill at [`skills/engram-memory/SKILL.md`](skills/engram-memory/SKILL.md). Install it into `.opencode/skills/engram-memory/SKILL.md` for a project or `~/.config/opencode/skills/engram-memory/SKILL.md` globally to teach agents when to use `memory_context`, `memory`, `memory_feedback`, and `stats`.
@@ -102,6 +112,10 @@ bun run ./src/cli/run.ts maintain [--apply] [--health-report] --project-id <uuid
 bun run ./src/cli/run.ts curate [--apply] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts telemetry [--events] [--json] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts sprint [--rows 3000] [--local-only] [--rerank] --worktree /path/to/project
+bun run ./src/cli/run.ts doctor [--json] --worktree /path/to/project
+bun run ./src/cli/run.ts status [--json] --worktree /path/to/project
+bun run ./src/cli/run.ts check [--json] --worktree /path/to/project
+bun run ./src/cli/run.ts repair-sidecar [--apply] --worktree /path/to/project
 ```
 
 `archive delete` verifies every requested archive before touching the hot DB. `archive restore` is dry-run by default; pass `--apply` only after testing on a copy of `opencode.db`.
