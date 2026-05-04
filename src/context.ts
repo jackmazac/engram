@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { queryChunksByCorrelation } from "./db.ts";
+import type { ChunkCorrelationFilters } from "./types.ts";
 
 export type ContextMode = "plan" | "implement" | "review" | "debug" | "audit" | "handoff";
 
@@ -14,10 +16,17 @@ export type WorkspaceSignals = {
   changedFiles?: string[];
   branch?: string | null;
   correlationId?: string;
+  workspaceId?: string;
+  planId?: string;
   sessionId?: string;
   planSlug?: string;
   waveId?: string;
   agentRunId?: string;
+  toolCallId?: string;
+  spineSeq?: number;
+  lifecycleObjectId?: string;
+  artifactRef?: string;
+  concordEventId?: string;
   lifecycleObjectIds?: string[];
   artifactRefs?: string[];
   concordEventIds?: string[];
@@ -52,7 +61,7 @@ export type ContextBundle = {
   terms: string[];
   workspaceSignals?: WorkspaceSignals;
   sections: ContextBundleSection[];
-  suggestedNextSteps: string[];
+  suggestedNextSteps?: string[];
 };
 
 type Candidate = Omit<ContextBundleItem, "section" | "score" | "reasons"> & {
@@ -78,19 +87,31 @@ export function buildContextBundle(opts: {
   mode?: ContextMode;
   workspaceSignals?: WorkspaceSignals;
   budgetChars?: number;
+  proactiveHintsEnabled?: boolean;
 }): ContextBundle {
   const mode = opts.mode ?? "plan";
   const terms = expandTerms(opts.query, opts.workspaceSignals);
   const limit = Math.max(1, Math.min(opts.limit, 50));
+  const correlationChunkIds = new Set(
+    queryChunksByCorrelation(opts.db, correlationFilters(opts.workspaceSignals)),
+  );
   const candidates = [
+    ...correlatedChunkCandidates(opts.db, opts.projectId, correlationChunkIds),
     ...rootCandidates(opts.db, opts.projectId, terms, limit),
     ...artifactCandidates(opts.db, opts.projectId, terms, limit),
     ...distillationCandidates(opts.db, opts.projectId, terms, limit),
     ...chunkCandidates(opts.db, opts.projectId, terms, limit * 2),
   ];
-  const ranked = rankCandidates(dedupeCandidates(candidates), mode, opts.workspaceSignals);
+  const ranked = rankCandidates(
+    dedupeCandidates(candidates),
+    mode,
+    opts.workspaceSignals,
+    correlationChunkIds,
+  );
   const sections = buildSections(ranked, mode, limit, opts.budgetChars ?? 6000);
-  const suggestedNextSteps = suggestedSteps(sections, mode);
+  // Fleet passivity: rule-based steering stays off unless the operator explicitly opts in.
+  const suggestedNextSteps =
+    opts.proactiveHintsEnabled === true ? suggestedSteps(sections, mode) : [];
 
   if (suggestedNextSteps.length) {
     sections.push({
@@ -114,15 +135,51 @@ export function buildContextBundle(opts: {
     });
   }
 
-  return {
+  const bundle: ContextBundle = {
     query: opts.query,
     mode,
     generatedAt: new Date().toISOString(),
     terms,
     workspaceSignals: opts.workspaceSignals,
     sections,
-    suggestedNextSteps,
   };
+  if (opts.proactiveHintsEnabled === true) bundle.suggestedNextSteps = suggestedNextSteps;
+  return bundle;
+}
+
+function correlatedChunkCandidates(db: Database, projectId: string, ids: Set<string>): Candidate[] {
+  if (ids.size === 0) return [];
+  const selected = [...ids].slice(0, 50);
+  const placeholders = selected.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT id, content, content_type, source_kind, authority, root_session_id, time_created, 0 AS rank_score
+       FROM chunk
+       WHERE project_id = ? AND id IN (${placeholders}) AND superseded_by IS NULL`,
+    )
+    .all(projectId, ...selected);
+  return rows.flatMap((row) => {
+    if (!isChunkRow(row)) return [];
+    const candidate: Candidate = {
+      id: row.id,
+      source: "chunk",
+      type: row.content_type,
+      title: null,
+      sourceKind: row.source_kind,
+      authority: row.authority,
+      baseScore: 24 + row.authority * 2,
+      text: row.content,
+      matchedTerms: [],
+      reasons: [
+        "fleet correlation match",
+        row.source_kind ? `${row.source_kind} memory` : "memory chunk",
+      ],
+      evidenceIds: [row.id],
+      rootSessionId: row.root_session_id,
+      timeCreated: row.time_created,
+    };
+    return [candidate];
+  });
 }
 
 function rootCandidates(
@@ -335,18 +392,21 @@ function rankCandidates(
   candidates: Candidate[],
   mode: ContextMode,
   signals: WorkspaceSignals | undefined,
+  correlationChunkIds: Set<string>,
 ): ContextBundleItem[] {
   return candidates
     .map((c) => {
       const modeBoost = modeTypeBoost(mode, c.type, c.source);
       const workspaceBoost = workspaceSignalBoost(c, signals);
+      const correlationBoost = c.source === "chunk" && correlationChunkIds.has(c.id) ? 18 : 0;
       const lowValuePenalty = c.type === "tool_trace" ? -8 : 0;
-      const score = c.baseScore + modeBoost + workspaceBoost + lowValuePenalty;
+      const score = c.baseScore + modeBoost + workspaceBoost + correlationBoost + lowValuePenalty;
       const reasons = [
         ...c.reasons,
         ...(c.matchedTerms.length ? [`matched ${c.matchedTerms.join(", ")}`] : []),
         modeBoost ? `${mode} mode boost` : "",
         workspaceBoost ? "workspace signal match" : "",
+        correlationBoost ? "fleet correlation match" : "",
         c.type === "tool_trace" ? "tool_trace demoted" : "",
         "not superseded",
       ].filter(Boolean);
@@ -517,14 +577,54 @@ function correlationTerms(signals: WorkspaceSignals | undefined): string[] {
   if (!signals) return [];
   return [
     signals.correlationId,
+    signals.workspaceId,
+    signals.planId,
     signals.sessionId,
     signals.planSlug,
     signals.waveId,
     signals.agentRunId,
+    signals.toolCallId,
+    signals.lifecycleObjectId,
+    signals.artifactRef,
+    signals.concordEventId,
     ...(signals.lifecycleObjectIds ?? []),
     ...(signals.artifactRefs ?? []),
     ...(signals.concordEventIds ?? []),
   ].flatMap((value) => (value ? tokenize(value) : []));
+}
+
+function correlationFilters(signals: WorkspaceSignals | undefined): ChunkCorrelationFilters {
+  if (!signals) return {};
+  const lifecycle = signals.lifecycleObjectId ?? signals.lifecycleObjectIds?.[0] ?? null;
+  const artifact = signals.artifactRef ?? signals.artifactRefs?.[0] ?? null;
+  return {
+    workspace_id: signals.workspaceId ?? null,
+    plan_id: signals.planId ?? null,
+    wave_id: signals.waveId ?? null,
+    agent_run_id: signals.agentRunId ?? null,
+    correlation_id: signals.correlationId ?? null,
+    tool_call_id: signals.toolCallId ?? null,
+    spine_seq: signals.spineSeq ?? null,
+    artifact_ref: artifact,
+    lifecycle_object_id: lifecycle,
+  };
+}
+
+function isChunkRow(value: unknown): value is ChunkRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.content === "string" &&
+    typeof value.content_type === "string" &&
+    (value.source_kind === null || typeof value.source_kind === "string") &&
+    typeof value.authority === "number" &&
+    (value.root_session_id === null || typeof value.root_session_id === "string") &&
+    (value.time_created === null || typeof value.time_created === "number")
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function tokenize(text: string): string[] {

@@ -3,8 +3,15 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { ulid } from "ulid";
+import {
+  buildArtifactRef,
+  decodeFleetContext,
+  fleetContextToJson,
+} from "@jackmazac/opencode-fleet-contracts";
 import type { EngramConfig } from "./config.ts";
+import { insertChunkCorrelation } from "./db.ts";
 import { contentHash } from "./hash.ts";
+import type { EngramCorrelation } from "./types.ts";
 
 export type ArtifactKind =
   | "journal"
@@ -25,6 +32,8 @@ export type ArtifactIngestSummary = {
   sourcesChanged: number;
   items: number;
   chunksInserted: number;
+  artifact_refs: string[];
+  lifecycle_object_ids: string[];
   errors: string[];
 };
 
@@ -58,6 +67,7 @@ export function ingestArtifacts(opts: {
   dryRun: boolean;
   kinds?: string[];
   max?: number;
+  correlation?: EngramCorrelation | null;
 }): ArtifactIngestSummary {
   const runId = ulid();
   const sources = discoverSources(opts.worktree, opts.cfg).filter(
@@ -67,6 +77,8 @@ export function ingestArtifacts(opts: {
   let sourcesChanged = 0;
   let items = 0;
   let chunksInserted = 0;
+  const artifactRefs = new Set<string>();
+  const lifecycleObjectIds = new Set<string>();
   const max = opts.max ?? Number.POSITIVE_INFINITY;
 
   const sourceRows: Array<{
@@ -140,7 +152,12 @@ export function ingestArtifacts(opts: {
         if (!src) continue;
         for (const item of row.parsed) {
           const h = contentHash(item.content);
-          const ref = `artifact:${row.source.rel}:${h}`;
+          const legacyRef = `artifact:${row.source.rel}:${h}`;
+          const canonical = buildArtifactRef({ kind: item.kind, path: row.source.rel, hash: h });
+          const ref = canonical.ref;
+          const lifecycleObjectId = lifecycleObjectIdFor(row.source, item);
+          artifactRefs.add(ref);
+          if (lifecycleObjectId) lifecycleObjectIds.add(lifecycleObjectId);
           insertItem.run(
             ulid(),
             src.id,
@@ -154,9 +171,14 @@ export function ingestArtifacts(opts: {
             item.time,
             now,
           );
-          if (existingChunk.get(opts.projectId, ref)) continue;
+          if (
+            existingChunk.get(opts.projectId, ref) ||
+            existingChunk.get(opts.projectId, legacyRef)
+          )
+            continue;
+          const chunkId = ulid();
           insertChunk.run(
-            ulid(),
+            chunkId,
             `artifact:${item.kind}`,
             ref,
             null,
@@ -182,6 +204,10 @@ export function ingestArtifacts(opts: {
             ref,
             authority[item.kind],
           );
+          insertChunkCorrelation(opts.db, {
+            chunk_id: chunkId,
+            correlation: withArtifactCorrelation(opts.correlation, ref, lifecycleObjectId),
+          });
           chunksInserted++;
         }
       }
@@ -208,6 +234,8 @@ export function ingestArtifacts(opts: {
     sourcesChanged,
     items,
     chunksInserted,
+    artifact_refs: [...artifactRefs],
+    lifecycle_object_ids: [...lifecycleObjectIds],
     errors,
   };
 }
@@ -217,8 +245,34 @@ export function formatArtifactIngestSummary(s: ArtifactIngestSummary): string {
     `Artifact ingest ${s.dryRun ? "dry-run" : "applied"} ${s.runId}`,
     `discovered=${s.discovered} changed=${s.sourcesChanged} items=${s.items} chunksInserted=${s.chunksInserted}`,
   ];
+  if (s.artifact_refs.length) lines.push(`artifact_refs=${s.artifact_refs.join(",")}`);
+  if (s.lifecycle_object_ids.length)
+    lines.push(`lifecycle_object_ids=${s.lifecycle_object_ids.join(",")}`);
   for (const e of s.errors.slice(0, 10)) lines.push(`error: ${e}`);
   return lines.join("\n");
+}
+
+function withArtifactCorrelation(
+  base: EngramCorrelation | null | undefined,
+  artifactRef: string,
+  lifecycleObjectId: string | null,
+): EngramCorrelation | null {
+  const raw = {
+    ...(base ? fleetContextToJson(base) : {}),
+    artifact_ref: artifactRef,
+    lifecycle_object_id: lifecycleObjectId,
+  };
+  const decoded = decodeFleetContext(raw);
+  if (decoded.ok) return decoded.value;
+  return base ?? null;
+}
+
+function lifecycleObjectIdFor(source: Source, item: Item): string | null {
+  if (source.kind === "concord_collision" || source.kind === "concord_guidance") {
+    if (item.slug?.startsWith("concord:")) return `concord-event:${item.slug}`;
+  }
+  if (source.kind === "lifecycle") return `source-file:${source.rel}`;
+  return null;
 }
 
 export function discoverSources(worktree: string, cfg: EngramConfig): Source[] {

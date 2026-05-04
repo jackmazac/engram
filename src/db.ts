@@ -1,67 +1,71 @@
-import path from "node:path"
-import { existsSync, mkdirSync, renameSync } from "node:fs"
-import { Database } from "bun:sqlite"
-import type { EngramConfig } from "./config.ts"
+import path from "node:path";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import type { EngramConfig } from "./config.ts";
+import type { ChunkCorrelationFilters, ChunkCorrelationRow, EngramCorrelation } from "./types.ts";
 
-const busyMs = 5000
+const busyMs = 5000;
 
 /** WAL + safety for the Engram sidecar DB (create/migrate). */
 export function applySidecarPragmas(db: Database) {
-  db.run(`PRAGMA busy_timeout = ${busyMs};`)
-  db.run("PRAGMA journal_mode = WAL;")
-  db.run("PRAGMA synchronous = NORMAL;")
-  db.run("PRAGMA foreign_keys = ON;")
+  db.run(`PRAGMA busy_timeout = ${busyMs};`);
+  db.run("PRAGMA journal_mode = WAL;");
+  db.run("PRAGMA synchronous = NORMAL;");
+  db.run("PRAGMA foreign_keys = ON;");
 }
 
 /** Shared hot CLI connection: FK checks + brief busy wait under contention. */
 export function applyConnPragmas(db: Database) {
-  db.run("PRAGMA foreign_keys = ON;")
-  db.run(`PRAGMA busy_timeout = ${busyMs};`)
+  db.run("PRAGMA foreign_keys = ON;");
+  db.run(`PRAGMA busy_timeout = ${busyMs};`);
 }
 
 export function openMemoryDb(file: string): Database {
-  const db = new Database(file, { create: true })
-  applySidecarPragmas(db)
-  migrate(db)
-  return db
+  const db = new Database(file, { create: true });
+  applySidecarPragmas(db);
+  migrate(db);
+  return db;
 }
 
 export type SidecarHealth =
   | { ok: true }
   | {
-      ok: false
-      error: string
-    }
+      ok: false;
+      error: string;
+    };
 
 export type SidecarRepairResult = {
-  repaired: boolean
-  dryRun: boolean
-  path: string
-  quarantineDir: string
-  files: string[]
-}
+  repaired: boolean;
+  dryRun: boolean;
+  path: string;
+  quarantineDir: string;
+  files: string[];
+};
 
 export function checkSidecarHealth(file: string): SidecarHealth {
-  if (!existsSync(file)) return { ok: false, error: `Sidecar does not exist: ${file}` }
+  if (!existsSync(file)) return { ok: false, error: `Sidecar does not exist: ${file}` };
 
-  let db: Database | undefined
+  let db: Database | undefined;
   try {
-    db = new Database(file)
-    applyConnPragmas(db)
-    db.exec("PRAGMA quick_check;")
-    db.exec("SELECT count(*) FROM sqlite_schema;")
-    return { ok: true }
+    db = new Database(file);
+    applyConnPragmas(db);
+    db.exec("PRAGMA quick_check;");
+    db.exec("SELECT count(*) FROM sqlite_schema;");
+    return { ok: true };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {
-    db?.close()
+    db?.close();
   }
 }
 
 export function repairSidecar(opts: { path: string; dryRun?: boolean }): SidecarRepairResult {
-  const dryRun = opts.dryRun !== false
-  const files = sidecarFiles(opts.path).filter((file) => existsSync(file))
-  const quarantineDir = path.join(path.dirname(opts.path), `.memory-quarantine-${repairTimestamp()}`)
+  const dryRun = opts.dryRun !== false;
+  const files = sidecarFiles(opts.path).filter((file) => existsSync(file));
+  const quarantineDir = path.join(
+    path.dirname(opts.path),
+    `.memory-quarantine-${repairTimestamp()}`,
+  );
 
   if (dryRun) {
     return {
@@ -70,18 +74,18 @@ export function repairSidecar(opts: { path: string; dryRun?: boolean }): Sidecar
       path: opts.path,
       quarantineDir,
       files,
-    }
+    };
   }
 
   if (files.length > 0) {
-    mkdirSync(quarantineDir, { recursive: true })
+    mkdirSync(quarantineDir, { recursive: true });
     for (const file of files) {
-      renameSync(file, path.join(quarantineDir, path.basename(file)))
+      renameSync(file, path.join(quarantineDir, path.basename(file)));
     }
   }
 
-  const db = openMemoryDb(opts.path)
-  db.close()
+  const db = openMemoryDb(opts.path);
+  db.close();
 
   return {
     repaired: true,
@@ -89,20 +93,20 @@ export function repairSidecar(opts: { path: string; dryRun?: boolean }): Sidecar
     path: opts.path,
     quarantineDir,
     files,
-  }
+  };
 }
 
 function sidecarFiles(file: string): string[] {
-  return [file, `${file}-wal`, `${file}-shm`]
+  return [file, `${file}-wal`, `${file}-shm`];
 }
 
 function repairTimestamp(): string {
-  return new Date().toISOString().replace(/[^0-9]/g, "")
+  return new Date().toISOString().replace(/[^0-9]/g, "");
 }
 
-function migrate(db: Database) {
-  const row = db.query("PRAGMA user_version;").get() as { user_version: number } | undefined
-  let v = Number(row?.user_version ?? 0)
+export function migrate(db: Database) {
+  const row = db.query("PRAGMA user_version;").get() as { user_version: number } | undefined;
+  let v = Number(row?.user_version ?? 0);
   if (v < 1) {
     db.exec(`
 CREATE TABLE IF NOT EXISTS chunk (
@@ -243,16 +247,16 @@ CREATE TABLE IF NOT EXISTS session_memory_last (
 );
 
 PRAGMA user_version = 1;
-  `)
-    v = 1
+  `);
+    v = 1;
   }
 
   if (v < 2) {
     db.exec(`
 ALTER TABLE export_checkpoint ADD COLUMN exported_part_id TEXT;
 PRAGMA user_version = 2;
-    `)
-    v = 2
+    `);
+    v = 2;
   }
 
   if (v < 3) {
@@ -262,8 +266,8 @@ CREATE TABLE IF NOT EXISTS engram_meta (
   v TEXT NOT NULL
 );
 PRAGMA user_version = 3;
-    `)
-    v = 3
+    `);
+    v = 3;
   }
 
   if (v < 4) {
@@ -288,8 +292,8 @@ CREATE INDEX IF NOT EXISTS idx_chunk_unembedded_project_time ON chunk(project_id
 CREATE INDEX IF NOT EXISTS idx_chunk_identity_hash ON chunk(project_id, session_id, message_id, coalesce(part_id, ''), content_hash);
 
 PRAGMA user_version = 4;
-    `)
-    v = 4
+    `);
+    v = 4;
   }
 
   if (v < 5) {
@@ -305,8 +309,8 @@ CREATE INDEX IF NOT EXISTS idx_chunk_embedding_version
   WHERE embedding IS NOT NULL;
 
 PRAGMA user_version = 5;
-    `)
-    v = 5
+    `);
+    v = 5;
   }
 
   if (v < 6) {
@@ -334,8 +338,8 @@ ALTER TABLE export_checkpoint_next RENAME TO export_checkpoint;
 CREATE INDEX IF NOT EXISTS idx_export_checkpoint_project ON export_checkpoint(project_id);
 
 PRAGMA user_version = 6;
-    `)
-    v = 6
+    `);
+    v = 6;
   }
 
   if (v < 7) {
@@ -358,8 +362,8 @@ CREATE INDEX IF NOT EXISTS idx_operation_metric_project_time ON operation_metric
 CREATE INDEX IF NOT EXISTS idx_operation_metric_project_op_time ON operation_metric(project_id, operation, time_created DESC);
 
 PRAGMA user_version = 7;
-    `)
-    v = 7
+    `);
+    v = 7;
   }
 
   if (v < 8) {
@@ -380,8 +384,8 @@ CREATE TABLE IF NOT EXISTS eval_run (
 CREATE INDEX IF NOT EXISTS idx_eval_run_project_time ON eval_run(project_id, time_created DESC);
 
 PRAGMA user_version = 8;
-    `)
-    v = 8
+    `);
+    v = 8;
   }
 
   if (v < 9) {
@@ -400,8 +404,8 @@ CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_project_chunk ON retrieval_fee
 CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_project_time ON retrieval_feedback(project_id, time_created DESC);
 
 PRAGMA user_version = 9;
-    `)
-    v = 9
+    `);
+    v = 9;
   }
 
   if (v < 10) {
@@ -432,8 +436,8 @@ CREATE INDEX IF NOT EXISTS idx_curation_run_project_time ON curation_run(project
 CREATE INDEX IF NOT EXISTS idx_curation_proposal_project_action ON curation_proposal(project_id, action);
 
 PRAGMA user_version = 10;
-    `)
-    v = 10
+    `);
+    v = 10;
   }
 
   if (v < 11) {
@@ -539,8 +543,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_relation_project_from ON memory_relation(p
 CREATE INDEX IF NOT EXISTS idx_memory_relation_project_to ON memory_relation(project_id, to_chunk_id);
 
 PRAGMA user_version = 11;
-    `)
-    v = 11
+    `);
+    v = 11;
   }
 
   if (v < 12) {
@@ -566,13 +570,191 @@ CREATE INDEX IF NOT EXISTS idx_log_event_project_level_time ON log_event(project
 CREATE INDEX IF NOT EXISTS idx_log_event_project_category_time ON log_event(project_id, category, time_created DESC);
 
 PRAGMA user_version = 12;
-    `)
-    v = 12
+    `);
+    v = 12;
+  }
+
+  if (v < 13) {
+    db.exec(`
+CREATE TABLE IF NOT EXISTS chunk_correlation (
+  chunk_id TEXT PRIMARY KEY REFERENCES chunk(id) ON DELETE CASCADE,
+  workspace_id TEXT,
+  plan_id TEXT,
+  wave_id TEXT,
+  agent_run_id TEXT,
+  correlation_id TEXT,
+  tool_call_id TEXT,
+  spine_seq INTEGER,
+  artifact_ref TEXT,
+  lifecycle_object_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_cc_workspace ON chunk_correlation(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_cc_plan ON chunk_correlation(plan_id);
+CREATE INDEX IF NOT EXISTS idx_cc_wave ON chunk_correlation(wave_id);
+CREATE INDEX IF NOT EXISTS idx_cc_agent_run ON chunk_correlation(agent_run_id);
+CREATE INDEX IF NOT EXISTS idx_cc_correlation ON chunk_correlation(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_cc_tool_call ON chunk_correlation(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_cc_spine ON chunk_correlation(spine_seq);
+CREATE INDEX IF NOT EXISTS idx_cc_artifact ON chunk_correlation(artifact_ref);
+CREATE INDEX IF NOT EXISTS idx_cc_lifecycle ON chunk_correlation(lifecycle_object_id);
+    `);
+    addColumnIfMissing(db, "operation_metric", "workspace_id", "TEXT");
+    addColumnIfMissing(db, "operation_metric", "correlation_id", "TEXT");
+    addColumnIfMissing(db, "log_event", "workspace_id", "TEXT");
+    addColumnIfMissing(db, "log_event", "correlation_id", "TEXT");
+    db.exec(`
+CREATE INDEX IF NOT EXISTS idx_operation_metric_workspace_time ON operation_metric(workspace_id, time_created DESC);
+CREATE INDEX IF NOT EXISTS idx_operation_metric_correlation_time ON operation_metric(correlation_id, time_created DESC);
+CREATE INDEX IF NOT EXISTS idx_log_event_workspace_time ON log_event(workspace_id, time_created DESC);
+CREATE INDEX IF NOT EXISTS idx_log_event_correlation_time ON log_event(correlation_id, time_created DESC);
+
+PRAGMA user_version = 13;
+    `);
+    v = 13;
   }
 }
 
+export const migrateMemoryDb = migrate;
+
+export function insertChunkCorrelation(
+  db: Database,
+  input: { chunk_id: string; correlation: EngramCorrelation | null | undefined },
+): void {
+  const correlation = input.correlation;
+  if (!correlation || !hasAnyCorrelation(correlation)) return;
+  db.prepare(
+    `INSERT OR REPLACE INTO chunk_correlation (
+      chunk_id, workspace_id, plan_id, wave_id, agent_run_id, correlation_id, tool_call_id,
+      spine_seq, artifact_ref, lifecycle_object_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.chunk_id,
+    nullableString(correlation.workspace_id),
+    nullableString(correlation.plan_id),
+    nullableString(correlation.wave_id),
+    nullableString(correlation.agent_run_id),
+    nullableString(correlation.correlation_id),
+    nullableString(correlation.tool_call_id),
+    correlation.spine_seq ?? null,
+    nullableString(correlation.artifact_ref),
+    nullableString(correlation.lifecycle_object_id),
+  );
+}
+
+export function readChunkCorrelation(db: Database, chunkId: string): ChunkCorrelationRow | null {
+  const row = db
+    .prepare(
+      `SELECT chunk_id, workspace_id, plan_id, wave_id, agent_run_id, correlation_id, tool_call_id,
+              spine_seq, artifact_ref, lifecycle_object_id
+       FROM chunk_correlation WHERE chunk_id = ?`,
+    )
+    .get(chunkId);
+  return isChunkCorrelationRow(row) ? row : null;
+}
+
+export function queryChunksByCorrelation(db: Database, filters: ChunkCorrelationFilters): string[] {
+  const clauses: string[] = [];
+  const args: Array<string | number> = [];
+  addFilter(clauses, args, "workspace_id", filters.workspace_id);
+  addFilter(clauses, args, "plan_id", filters.plan_id);
+  addFilter(clauses, args, "wave_id", filters.wave_id);
+  addFilter(clauses, args, "agent_run_id", filters.agent_run_id);
+  addFilter(clauses, args, "correlation_id", filters.correlation_id);
+  addFilter(clauses, args, "tool_call_id", filters.tool_call_id);
+  addFilter(clauses, args, "artifact_ref", filters.artifact_ref);
+  addFilter(clauses, args, "lifecycle_object_id", filters.lifecycle_object_id);
+  addFilter(clauses, args, "spine_seq", filters.spine_seq);
+  if (clauses.length === 0) return [];
+  const rows = db
+    .prepare(`SELECT chunk_id FROM chunk_correlation WHERE ${clauses.join(" AND ")} LIMIT 500`)
+    .all(...args);
+  return rows.flatMap((row) => (isChunkIdRow(row) ? [row.chunk_id] : []));
+}
+
+export function chunkCorrelationFiltersFromContext(
+  correlation: EngramCorrelation | null | undefined,
+): ChunkCorrelationFilters {
+  if (!correlation) return {};
+  return {
+    workspace_id: nullableString(correlation.workspace_id),
+    plan_id: nullableString(correlation.plan_id),
+    wave_id: nullableString(correlation.wave_id),
+    agent_run_id: nullableString(correlation.agent_run_id),
+    correlation_id: nullableString(correlation.correlation_id),
+    tool_call_id: nullableString(correlation.tool_call_id),
+    spine_seq: correlation.spine_seq ?? null,
+    artifact_ref: nullableString(correlation.artifact_ref),
+    lifecycle_object_id: nullableString(correlation.lifecycle_object_id),
+  };
+}
+
+function hasAnyCorrelation(correlation: EngramCorrelation): boolean {
+  return Object.values(chunkCorrelationFiltersFromContext(correlation)).some(
+    (value) => value !== null,
+  );
+}
+
+function nullableString(value: string | number | null): string | null {
+  if (value === null) return null;
+  return String(value);
+}
+
+function addFilter(
+  clauses: string[],
+  args: Array<string | number>,
+  column: keyof ChunkCorrelationRow,
+  value: string | number | null | undefined,
+): void {
+  if (value === undefined || value === null || column === "chunk_id") return;
+  clauses.push(`${column} = ?`);
+  args.push(value);
+}
+
+function isChunkIdRow(value: unknown): value is { chunk_id: string } {
+  return isRecord(value) && typeof value.chunk_id === "string";
+}
+
+function isChunkCorrelationRow(value: unknown): value is ChunkCorrelationRow {
+  return (
+    isRecord(value) &&
+    typeof value.chunk_id === "string" &&
+    isNullableString(value.workspace_id) &&
+    isNullableString(value.plan_id) &&
+    isNullableString(value.wave_id) &&
+    isNullableString(value.agent_run_id) &&
+    isNullableString(value.correlation_id) &&
+    isNullableString(value.tool_call_id) &&
+    isNullableNumber(value.spine_seq) &&
+    isNullableString(value.artifact_ref) &&
+    isNullableString(value.lifecycle_object_id)
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || typeof value === "number";
+}
+
+function addColumnIfMissing(db: Database, table: string, column: string, definition: string): void {
+  if (columnExists(db, table, column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+}
+
+function columnExists(db: Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table});`).all();
+  return rows.some((row) => isRecord(row) && row.name === column);
+}
+
 export function sidecarPath(worktree: string, cfg: EngramConfig): string {
-  const p = cfg.sidecar.path
-  if (path.isAbsolute(p)) return p
-  return path.join(worktree, p)
+  const p = cfg.sidecar.path;
+  if (path.isAbsolute(p)) return p;
+  return path.join(worktree, p);
 }

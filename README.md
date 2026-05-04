@@ -1,6 +1,6 @@
 # Engram
 
-OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, streaming cosine retrieval, RRF merge, optional LLM rerank, telemetry, eval reports, archive maintenance, and curation workflows. It captures session text and tool traces, exposes **`memory`**, **`forget`**, **`memory_feedback`**, and **`stats`** tools, can inject **`<project_memory>`** and a light **`<engram-hint>`** for root sessions (same `experimental.chat.system.transform` hook family as [DCP](https://github.com/Tarquinen/opencode-dynamic-context-pruning)), and ships a small **`engram`** CLI for eval, dashboard, archive, curation, and maintenance work.
+OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, streaming cosine retrieval, RRF merge, optional LLM rerank, telemetry, eval reports, archive maintenance, and curation workflows. It captures session text and tool traces, exposes **`memory`**, **`memory_context`**, **`conflict_context`**, **`lifecycle_ingest`**, **`forget`**, **`memory_feedback`**, and **`stats`** tools, and ships a small **`engram`** CLI for eval, dashboard, archive, curation, and maintenance work.
 
 **Repository:** [github.com/jackmazac/opencode-engram](https://github.com/jackmazac/opencode-engram)
 
@@ -41,16 +41,27 @@ security add-generic-password -s OPENAI_API_KEY -a default -w "sk-..."
 
 ## Orchestrator hint
 
-With **`hints.orchestrator`** `true` (default), Engram appends a short **`<!-- Engram --><engram-hint>…`** block to the **last** entry of `system[]` on `experimental.chat.system.transform`, matching how DCP extends the system prompt. It runs only when **`session.get`** shows **no `parentID`** (skip task / child sessions). Utility prompts (title generator, conversation summarizer, etc.) are skipped. Turn off with `"hints": { "orchestrator": false }`. This is separate from **`proactive`** `<project_memory>` (which still needs an API key).
+Engram is passive by default. **`<project_memory>`** and **`<!-- Engram --><engram-hint>…`** system injection are off unless `context.proactiveHints.enabled` is explicitly `true`. When enabled, `hints.orchestrator` still controls the short hint block and `proactive` still controls retrieved `<project_memory>` (which needs an API key). Utility prompts (title generator, conversation summarizer, etc.) are skipped.
 
 ## Tools
 
 | Tool              | Purpose                                                               |
 | ----------------- | --------------------------------------------------------------------- |
 | `memory`          | Search memory (FTS + streaming vector scan + merge; optional rerank). |
+| `memory_context`  | Build a bounded evidence bundle; suggested next steps are opt-in only. |
+| `conflict_context` | Fetch correlation-aware evidence by fleet IDs/artifacts/lifecycle.    |
+| `lifecycle_ingest` | Ingest file-based lifecycle/artifact outputs; dry-run by default.      |
 | `memory_feedback` | Mark retrieved chunks useful/not useful so future ranking can adapt.  |
 | `forget`          | Drop chunks matching a pattern / scope (see config limits).           |
 | `stats`           | Sidecar stats, telemetry summaries, and embedding health.             |
+
+## Fleet correlation (Wave 3)
+
+Wave 3 adds a nullable sidecar table, **`chunk_correlation`**, instead of widening the hot `chunk` insert path. The table keys `chunk_id` to fleet IDs: `workspace_id`, `plan_id`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `spine_seq`, `artifact_ref`, and `lifecycle_object_id`, with one index per field. New captures and artifact ingestion attach rows when a valid fleet context is available; old chunks remain valid and simply have no sidecar row.
+
+`conflict_context` mirrors `engram context --json` for plugin callers and accepts plan/wave/agent/correlation/tool/artifact/lifecycle/concord IDs. `lifecycle_ingest` mirrors file-based artifact ingestion and returns `{applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids}`. Both tools stay local-only and do not call OpenAI unless the existing embedding/rerank path is explicitly configured with an API key.
+
+`memory_context` and `engram context` now default to evidence-only output: no `suggestedNextSteps`, no `<engram-hint>`, and no `<project_memory>` unless `context.proactiveHints.enabled=true`.
 
 ## Agent Skill
 
@@ -120,6 +131,8 @@ Run from **this directory** (not a monorepo root):
 bun install
 bun run typecheck
 bun test --timeout 30000
+bun run check
+bun run smoke:runtime
 ```
 
 Tests include an **optional live** suite (`test/openai-live-nano.test.ts`) when a key resolves via env or Keychain. Performance checks use a real in-memory SQLite path in `test/perf-operations.test.ts`.
@@ -145,6 +158,18 @@ This repo is intended to load via a direct `file://` plugin entry during local d
 - Capture enqueue is designed to stay lightweight on typical dev hardware.
 - Vector search intentionally remains the canonical streaming brute-force implementation for now. There is no sqlite-vec fallback path; a vector index should only replace the canonical backend after eval/telemetry prove it is necessary.
 - Archive export throughput depends on `archive.batchSize` and DB size; ballpark on the order of seconds per thousand messages is normal.
+
+## Retention
+
+Defaults remain unchanged: operation metrics retain **14 days**, log events retain **14 days**, and log events are capped at **5000 rows**. Tune these in `.opencode/engram.jsonc` under `telemetry.retainDays`, `telemetry.eventRetainDays`, and `telemetry.eventMaxRows`. Apply pruning explicitly with:
+
+```bash
+bun run ./src/cli/run.ts maintain --prune-telemetry --apply --project-id <uuid> --worktree /path/to/project
+```
+
+## Ownership
+
+Engram owns local memory, artifact ingestion, retention, retrieval, context bundles, archive workflows, and memory telemetry. Engram does **not** own doctrine, lifecycle policy, code-graph truth, live edit locks, fleet install/update, or OpenCode config generation; those belong to Conductor, Codemem, Concord, and opencode-fleet respectively.
 
 ## License
 

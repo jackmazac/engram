@@ -1,32 +1,32 @@
-import type { EngramConfig } from "./config.ts"
-import { contentHash, normalizeForHash } from "./hash.ts"
-import type { ChunkInsert } from "./types.ts"
+import type { EngramConfig } from "./config.ts";
+import { contentHash, normalizeForHash } from "./hash.ts";
+import type { ChunkInsert, EngramCorrelation } from "./types.ts";
 
 function provisionalType(agent: string): string {
-  const a = agent.toLowerCase()
-  if (a.includes("planner")) return "analysis"
-  if (a.includes("orchestrator")) return "synthesis"
-  return "discovery"
+  const a = agent.toLowerCase();
+  if (a.includes("planner")) return "analysis";
+  if (a.includes("orchestrator")) return "synthesis";
+  return "discovery";
 }
 
 function shouldSkip(type: string, cfg: EngramConfig): boolean {
-  const allow = cfg.capture.allowPartTypes
-  if (allow.length > 0 && !allow.includes(type)) return true
-  if (cfg.capture.extraPartTypes.includes(type)) return false
-  return cfg.capture.skipPartTypes.includes(type)
+  const allow = cfg.capture.allowPartTypes;
+  if (allow.length > 0 && !allow.includes(type)) return true;
+  if (cfg.capture.extraPartTypes.includes(type)) return false;
+  return cfg.capture.skipPartTypes.includes(type);
 }
 
 function trunc(s: string, n: number): string {
-  if (s.length <= n) return s
-  return s.slice(0, n)
+  if (s.length <= n) return s;
+  return s.slice(0, n);
 }
 
 function tail(s: string, n: number): string {
-  if (s.length <= n) return s
-  return s.slice(-n)
+  if (s.length <= n) return s;
+  return s.slice(-n);
 }
 
-export type PartCtx = { agent: string | null; model: string | null }
+export type PartCtx = { agent: string | null; model: string | null };
 
 /** Build rows from a part event. Returns 0 or 1 row for v1. */
 export function fromPart(
@@ -35,20 +35,21 @@ export function fromPart(
   cfg: EngramConfig,
   planSlug: string | null,
   ctx: PartCtx,
+  correlation?: EngramCorrelation | null,
 ): ChunkInsert[] {
-  const t = part.type as string
-  if (shouldSkip(t, cfg)) return []
+  const t = part.type as string;
+  if (shouldSkip(t, cfg)) return [];
 
-  const sessionID = part.sessionID as string
-  const messageID = part.messageID as string
-  const partID = part.id as string
-  const agent = ctx.agent
-  const modelFromMeta = ctx.model
+  const sessionID = part.sessionID as string;
+  const messageID = part.messageID as string;
+  const partID = part.id as string;
+  const agent = ctx.agent;
+  const modelFromMeta = ctx.model;
 
   if (t === "text" && cfg.capture.assistantText) {
-    const text = part.text as string
-    if (!text?.trim()) return []
-    const h = contentHash(text)
+    const text = part.text as string;
+    if (!text?.trim()) return [];
+    const h = contentHash(text);
     return [
       {
         id: "", // filled by runtime ulid
@@ -73,14 +74,15 @@ export function fromPart(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
 
   if (t === "reasoning" && cfg.capture.reasoning) {
-    const text = (part as { text: string }).text
-    if (!text?.trim()) return []
-    const h = contentHash(text)
+    const text = (part as { text: string }).text;
+    if (!text?.trim()) return [];
+    const h = contentHash(text);
     return [
       {
         id: "",
@@ -105,25 +107,28 @@ export function fromPart(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
 
   if (t === "tool" && cfg.capture.toolTraces) {
-    const tool = part.tool as string
-    const st = part.state as Record<string, unknown>
-    const status = st.status as string
-    const policy = cfg.capture.policy
-    if (status === "completed" && policy.denyToolNames.includes(tool)) return []
-    let output = ""
-    if (status === "completed" && policy.captureCompletedToolOutput) output = (st as { output?: string }).output ?? ""
-    if (status === "error" && policy.captureErrorToolOutput) output = (st as { error?: string }).error ?? ""
-    output = trunc(output, policy.maxToolOutputLength)
-    const head = cfg.capture.toolOutputHead > 0 ? trunc(output, cfg.capture.toolOutputHead) : ""
-    const tailS = cfg.capture.toolOutputTail > 0 ? tail(output, cfg.capture.toolOutputTail) : ""
-    const summary = JSON.stringify({ tool, status, args: st.input })
-    const body = [summary, head, tailS].filter(Boolean).join("\n")
-    const h = contentHash(normalizeForHash(body) + "\n" + tool + "\n" + sessionID)
+    const tool = part.tool as string;
+    const st = part.state as Record<string, unknown>;
+    const status = st.status as string;
+    const policy = cfg.capture.policy;
+    if (status === "completed" && policy.denyToolNames.includes(tool)) return [];
+    let output = "";
+    if (status === "completed" && policy.captureCompletedToolOutput)
+      output = (st as { output?: string }).output ?? "";
+    if (status === "error" && policy.captureErrorToolOutput)
+      output = (st as { error?: string }).error ?? "";
+    output = trunc(output, policy.maxToolOutputLength);
+    const head = cfg.capture.toolOutputHead > 0 ? trunc(output, cfg.capture.toolOutputHead) : "";
+    const tailS = cfg.capture.toolOutputTail > 0 ? tail(output, cfg.capture.toolOutputTail) : "";
+    const summary = JSON.stringify({ tool, status, args: st.input });
+    const body = [summary, head, tailS].filter(Boolean).join("\n");
+    const h = contentHash(normalizeForHash(body) + "\n" + tool + "\n" + sessionID);
     return [
       {
         id: "",
@@ -148,15 +153,16 @@ export function fromPart(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
 
   if (t === "patch" && cfg.capture.toolTraces) {
-    const files = (part as { files: string[] }).files
-    const hash = (part as { hash: string }).hash
-    const body = `patch ${hash} files:${files.join(",")}`
-    const h = contentHash(body + sessionID)
+    const files = (part as { files: string[] }).files;
+    const hash = (part as { hash: string }).hash;
+    const body = `patch ${hash} files:${files.join(",")}`;
+    const h = contentHash(body + sessionID);
     return [
       {
         id: "",
@@ -181,11 +187,12 @@ export function fromPart(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
 
-  return []
+  return [];
 }
 
 export function fromAssistantError(
@@ -193,16 +200,17 @@ export function fromAssistantError(
   projectId: string,
   cfg: EngramConfig,
   planSlug: string | null,
+  correlation?: EngramCorrelation | null,
 ): ChunkInsert[] {
-  const err = info.error as { name?: string; data?: { message?: string } } | undefined
-  if (!err) return []
-  const sessionID = info.sessionID as string
-  const messageID = info.id as string
-  const agent = info.agent as string
-  const modelID = info.modelID as string
-  const msg = err.data?.message ?? err.name ?? "error"
-  const body = `error ${err.name}: ${msg}`
-  const h = contentHash(body + sessionID)
+  const err = info.error as { name?: string; data?: { message?: string } } | undefined;
+  if (!err) return [];
+  const sessionID = info.sessionID as string;
+  const messageID = info.id as string;
+  const agent = info.agent as string;
+  const modelID = info.modelID as string;
+  const msg = err.data?.message ?? err.name ?? "error";
+  const body = `error ${err.name}: ${msg}`;
+  const h = contentHash(body + sessionID);
   return [
     {
       id: "",
@@ -227,8 +235,9 @@ export function fromAssistantError(
       root_session_id: sessionID,
       session_depth: 0,
       plan_slug: planSlug,
+      correlation: correlation ?? null,
     },
-  ]
+  ];
 }
 
 /** Journal / plan mirror from tool output strings (tool.execute.after). */
@@ -239,10 +248,11 @@ export function fromMirroredTool(
   projectId: string,
   cfg: EngramConfig,
   planSlug: string | null,
+  correlation?: EngramCorrelation | null,
 ): ChunkInsert[] {
   if (tool === "journal" && cfg.capture.journalMirror && output) {
-    const content = trunc(output, cfg.sidecar.maxChunkLength)
-    const h = contentHash(content + sessionID + "journal")
+    const content = trunc(output, cfg.sidecar.maxChunkLength);
+    const h = contentHash(content + sessionID + "journal");
     return [
       {
         id: "",
@@ -267,12 +277,13 @@ export function fromMirroredTool(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
   if (tool === "plan" && cfg.capture.planMirror && output) {
-    const content = trunc(output, cfg.sidecar.maxChunkLength)
-    const h = contentHash(content + sessionID + "plan")
+    const content = trunc(output, cfg.sidecar.maxChunkLength);
+    const h = contentHash(content + sessionID + "plan");
     return [
       {
         id: "",
@@ -297,8 +308,9 @@ export function fromMirroredTool(
         root_session_id: sessionID,
         session_depth: 0,
         plan_slug: planSlug,
+        correlation: correlation ?? null,
       },
-    ]
+    ];
   }
-  return []
+  return [];
 }

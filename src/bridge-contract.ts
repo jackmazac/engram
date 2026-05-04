@@ -55,11 +55,18 @@ export const contextBundleRequestSchema = z.object({
     .object({
       changedFiles: z.array(z.string()).optional(),
       branch: z.string().nullable().optional(),
+      workspaceId: z.string().optional(),
+      planId: z.string().optional(),
       correlationId: z.string().optional(),
       sessionId: z.string().optional(),
       planSlug: z.string().optional(),
       waveId: z.string().optional(),
       agentRunId: z.string().optional(),
+      toolCallId: z.string().optional(),
+      spineSeq: z.number().int().nonnegative().optional(),
+      lifecycleObjectId: z.string().optional(),
+      artifactRef: z.string().optional(),
+      concordEventId: z.string().optional(),
       lifecycleObjectIds: z.array(z.string()).optional(),
       artifactRefs: z.array(z.string()).optional(),
       concordEventIds: z.array(z.string()).optional(),
@@ -102,5 +109,23 @@ export type ContextBundleResponse = {
   generatedAt: string;
   terms: string[];
   sections: ContextBundleSection[];
-  suggestedNextSteps: string[];
+  suggestedNextSteps?: string[];
+};
+
+export const fleetCorrelationBridgeNotes = {
+  schema: "chunk_correlation",
+  columns: [
+    "workspace_id",
+    "plan_id",
+    "wave_id",
+    "agent_run_id",
+    "correlation_id",
+    "tool_call_id",
+    "spine_seq",
+    "artifact_ref",
+    "lifecycle_object_id",
+  ],
+  pluginTools: ["conflict_context", "lifecycle_ingest"],
+  passiveDefault:
+    "suggestedNextSteps and system hint injection require context.proactiveHints.enabled=true",
 };

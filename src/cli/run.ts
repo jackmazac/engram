@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { makeHealthReport, type HealthCheckStatus } from "@jackmazac/opencode-fleet-contracts";
 import {
   deleteSubtreeFromHot,
   exportRootSession,
@@ -124,11 +125,15 @@ function contextSignals(args: string[], worktree: string): WorkspaceSignals | un
   const base: WorkspaceSignals = args.includes("--from-git") ? gitSignals(worktree) : {};
   const signals: WorkspaceSignals = {
     ...base,
+    workspaceId: valueArg(args, "--workspace-id"),
+    planId: valueArg(args, "--plan-id"),
     correlationId: valueArg(args, "--correlation-id"),
     sessionId: valueArg(args, "--session-id"),
     planSlug: valueArg(args, "--plan-slug"),
     waveId: valueArg(args, "--wave-id"),
     agentRunId: valueArg(args, "--agent-run-id"),
+    toolCallId: valueArg(args, "--tool-call-id"),
+    spineSeq: numberArg(args, "--spine-seq", 0) || undefined,
     lifecycleObjectIds: repeatedArg(args, "--lifecycle-object-id"),
     artifactRefs: repeatedArg(args, "--artifact-ref"),
     concordEventIds: repeatedArg(args, "--concord-event-id"),
@@ -154,6 +159,28 @@ function repeatedArg(args: string[], name: string): string[] | undefined {
     );
   }
   return values.length ? values : undefined;
+}
+
+function canonicalHealthReport(
+  report: ReturnType<typeof buildEngramHealthReport>,
+  startedAt: string,
+  finishedAt: string,
+) {
+  return makeHealthReport({
+    source: "engram",
+    started_at: startedAt,
+    finished_at: finishedAt,
+    checks: report.checks.map((check) => ({
+      name: check.name,
+      status: canonicalCheckStatus(check.status),
+      message: check.message,
+      detail: check.details,
+    })),
+  });
+}
+
+function canonicalCheckStatus(status: "pass" | "warn" | "fail" | "skip"): HealthCheckStatus {
+  return status === "pass" ? "ok" : status;
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -224,9 +251,13 @@ async function main() {
   const memoryPath = sidecarPath(wt, cfg);
 
   if (argv[0] === "doctor" || argv[0] === "status" || argv[0] === "check") {
+    const started = new Date().toISOString();
     const report = buildEngramHealthReport({ cfg, worktree: wt, sidecarPath: memoryPath });
+    const finished = new Date().toISOString();
     console.log(
-      argv.includes("--json") ? JSON.stringify(report, null, 2) : formatEngramHealthReport(report),
+      argv.includes("--json")
+        ? JSON.stringify(canonicalHealthReport(report, started, finished), null, 2)
+        : formatEngramHealthReport(report),
     );
     process.exit(report.status === "fail" ? 1 : 0);
   }
@@ -397,6 +428,7 @@ async function main() {
       mode: modeArg(argv),
       budgetChars: numberArg(argv, "--budget", 6000),
       workspaceSignals: contextSignals(argv, wt),
+      proactiveHintsEnabled: cfg.context.proactiveHints.enabled,
     });
     console.log(
       argv.includes("--json") ? JSON.stringify(bundle, null, 2) : formatContextBundle(bundle),

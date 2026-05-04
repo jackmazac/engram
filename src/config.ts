@@ -91,6 +91,14 @@ const memorySearch = z.object({
   forgetPatternMaxRows: z.number().int().positive().default(500),
 });
 
+const context = z.object({
+  proactiveHints: z
+    .object({
+      enabled: z.boolean().default(false),
+    })
+    .default({ enabled: false }),
+});
+
 const backfillCfg = z.object({
   enabled: z.boolean().default(true),
   lookbackDays: z.number().int().positive().default(90),
@@ -158,6 +166,7 @@ export const EngramConfig = z.object({
   archive,
   insights,
   memorySearch,
+  context,
   backfill: backfillCfg,
   telemetry,
   integration,
@@ -238,6 +247,11 @@ export const defaultEngramConfig = EngramConfig.parse({
     kRerank: 20,
     scopeIncludeUnembeddedGraceHours: 24,
     forgetPatternMaxRows: 500,
+  },
+  context: {
+    proactiveHints: {
+      enabled: false,
+    },
   },
   backfill: {
     enabled: true,
