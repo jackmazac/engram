@@ -1,6 +1,7 @@
 import path from "node:path";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { Database } from "bun:sqlite";
+import { ulid } from "ulid";
 import type { EngramConfig } from "./config.ts";
 import type { ChunkCorrelationFilters, ChunkCorrelationRow, EngramCorrelation } from "./types.ts";
 
@@ -613,9 +614,207 @@ PRAGMA user_version = 13;
     `);
     v = 13;
   }
+
+  if (v < 14) {
+    db.exec(`
+CREATE TABLE IF NOT EXISTS backfill_job (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  status TEXT NOT NULL,
+  cursor_json TEXT,
+  lease_owner TEXT,
+  lease_expires_at INTEGER,
+  processed_roots INTEGER NOT NULL DEFAULT 0,
+  processed_parts INTEGER NOT NULL DEFAULT 0,
+  inserted_chunks INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT,
+  time_created INTEGER NOT NULL,
+  time_updated INTEGER NOT NULL,
+  time_started INTEGER,
+  time_finished INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_backfill_job_project_status
+  ON backfill_job(project_id, status, time_updated DESC);
+CREATE INDEX IF NOT EXISTS idx_backfill_job_project_kind
+  ON backfill_job(project_id, kind, strategy, time_updated DESC);
+CREATE INDEX IF NOT EXISTS idx_backfill_job_lease
+  ON backfill_job(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
+
+PRAGMA user_version = 14;
+    `);
+    v = 14;
+  }
 }
 
 export const migrateMemoryDb = migrate;
+
+export type BackfillJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export type BackfillJobRow = {
+  id: string;
+  project_id: string;
+  kind: string;
+  strategy: string;
+  status: BackfillJobStatus;
+  cursor_json: string | null;
+  lease_owner: string | null;
+  lease_expires_at: number | null;
+  processed_roots: number;
+  processed_parts: number;
+  inserted_chunks: number;
+  error_summary: string | null;
+  time_created: number;
+  time_updated: number;
+  time_started: number | null;
+  time_finished: number | null;
+};
+
+export function createBackfillJob(
+  db: Database,
+  input: {
+    projectId: string;
+    kind: string;
+    strategy: string;
+    cursor?: Record<string, unknown> | null;
+    now?: number;
+  },
+): BackfillJobRow {
+  const now = input.now ?? Date.now();
+  const id = ulid();
+  db.prepare(
+    `INSERT INTO backfill_job (
+      id, project_id, kind, strategy, status, cursor_json, lease_owner, lease_expires_at,
+      processed_roots, processed_parts, inserted_chunks, error_summary, time_created, time_updated,
+      time_started, time_finished
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.projectId,
+    input.kind,
+    input.strategy,
+    "pending",
+    serializeCursor(input.cursor ?? null),
+    null,
+    null,
+    0,
+    0,
+    0,
+    null,
+    now,
+    now,
+    null,
+    null,
+  );
+  const job = readBackfillJob(db, id);
+  if (!job) throw new Error(`backfill job was not created: ${id}`);
+  return job;
+}
+
+export function readBackfillJob(db: Database, jobId: string): BackfillJobRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, project_id, kind, strategy, status, cursor_json, lease_owner, lease_expires_at,
+              processed_roots, processed_parts, inserted_chunks, error_summary, time_created,
+              time_updated, time_started, time_finished
+       FROM backfill_job WHERE id = ?`,
+    )
+    .get(jobId);
+  return isBackfillJobRow(row) ? row : null;
+}
+
+export function leaseBackfillJob(
+  db: Database,
+  input: { jobId: string; leaseOwner: string; leaseMs: number; now?: number },
+): BackfillJobRow | null {
+  const now = input.now ?? Date.now();
+  db.prepare(
+    `UPDATE backfill_job
+     SET status = 'running',
+         lease_owner = ?,
+         lease_expires_at = ?,
+         time_started = coalesce(time_started, ?),
+         time_updated = ?
+     WHERE id = ?
+       AND status IN ('pending', 'running')
+       AND (status = 'pending' OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
+  ).run(input.leaseOwner, now + input.leaseMs, now, now, input.jobId, now);
+  const job = readBackfillJob(db, input.jobId);
+  return job?.lease_owner === input.leaseOwner && job.status === "running" ? job : null;
+}
+
+export function updateBackfillJobProgress(
+  db: Database,
+  input: {
+    jobId: string;
+    cursor?: Record<string, unknown> | null;
+    processedRoots: number;
+    processedParts: number;
+    insertedChunks: number;
+    now?: number;
+  },
+): BackfillJobRow | null {
+  const now = input.now ?? Date.now();
+  db.prepare(
+    `UPDATE backfill_job
+     SET cursor_json = ?,
+         processed_roots = ?,
+         processed_parts = ?,
+         inserted_chunks = ?,
+         time_updated = ?
+     WHERE id = ? AND status = 'running'`,
+  ).run(
+    serializeCursor(input.cursor ?? null),
+    input.processedRoots,
+    input.processedParts,
+    input.insertedChunks,
+    now,
+    input.jobId,
+  );
+  return readBackfillJob(db, input.jobId);
+}
+
+export function finishBackfillJob(
+  db: Database,
+  input: {
+    jobId: string;
+    status: "completed" | "failed" | "cancelled";
+    errorSummary?: string | null;
+    now?: number;
+  },
+): BackfillJobRow | null {
+  const now = input.now ?? Date.now();
+  db.prepare(
+    `UPDATE backfill_job
+     SET status = ?,
+         lease_owner = NULL,
+         lease_expires_at = NULL,
+         error_summary = ?,
+         time_updated = ?,
+         time_finished = ?
+     WHERE id = ? AND status IN ('pending', 'running')`,
+  ).run(input.status, input.errorSummary ?? null, now, now, input.jobId);
+  return readBackfillJob(db, input.jobId);
+}
+
+export function cancelBackfillJob(
+  db: Database,
+  input: { jobId: string; now?: number },
+): BackfillJobRow | null {
+  return finishBackfillJob(db, { jobId: input.jobId, status: "cancelled", now: input.now });
+}
+
+export function countStaleBackfillJobs(db: Database, now: number = Date.now()): number {
+  const row = db
+    .prepare(
+      `SELECT count(*) AS n FROM backfill_job
+       WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+    )
+    .get(now);
+  return isCountRow(row) ? row.n : 0;
+}
 
 export function insertChunkCorrelation(
   db: Database,
@@ -715,6 +914,42 @@ function isChunkIdRow(value: unknown): value is { chunk_id: string } {
   return isRecord(value) && typeof value.chunk_id === "string";
 }
 
+function isBackfillJobRow(value: unknown): value is BackfillJobRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.project_id === "string" &&
+    typeof value.kind === "string" &&
+    typeof value.strategy === "string" &&
+    isBackfillJobStatus(value.status) &&
+    isNullableString(value.cursor_json) &&
+    isNullableString(value.lease_owner) &&
+    isNullableNumber(value.lease_expires_at) &&
+    typeof value.processed_roots === "number" &&
+    typeof value.processed_parts === "number" &&
+    typeof value.inserted_chunks === "number" &&
+    isNullableString(value.error_summary) &&
+    typeof value.time_created === "number" &&
+    typeof value.time_updated === "number" &&
+    isNullableNumber(value.time_started) &&
+    isNullableNumber(value.time_finished)
+  );
+}
+
+function isBackfillJobStatus(value: unknown): value is BackfillJobStatus {
+  return (
+    value === "pending" ||
+    value === "running" ||
+    value === "completed" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+function isCountRow(value: unknown): value is { n: number } {
+  return isRecord(value) && typeof value.n === "number";
+}
+
 function isChunkCorrelationRow(value: unknown): value is ChunkCorrelationRow {
   return (
     isRecord(value) &&
@@ -741,6 +976,10 @@ function isNullableString(value: unknown): value is string | null {
 
 function isNullableNumber(value: unknown): value is number | null {
   return value === null || typeof value === "number";
+}
+
+function serializeCursor(cursor: Record<string, unknown> | null): string | null {
+  return cursor === null ? null : JSON.stringify(cursor);
 }
 
 function addColumnIfMissing(db: Database, table: string, column: string, definition: string): void {

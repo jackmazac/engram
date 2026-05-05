@@ -25,10 +25,52 @@ export function topKByCosine(
     if (r.blob.byteLength !== query.byteLength) continue
     const score = cosine(query, blobToVec(r.blob))
     if (!Number.isFinite(score)) continue
-    let i = best.length
-    while (i > 0 && (best[i - 1]?.score ?? -Infinity) > score) i--
-    best.splice(i, 0, { id: r.id, score })
-    if (best.length > k) best.shift()
+    const item = { id: r.id, score }
+    if (best.length < k) {
+      heapPush(best, item)
+      continue
+    }
+    const worst = best[0]
+    if (worst && score > worst.score) {
+      best[0] = item
+      heapDown(best, 0)
+    }
   }
-  return best.reverse()
+  return best.sort((a, b) => b.score - a.score)
+}
+
+function heapPush(heap: { id: string; score: number }[], item: { id: string; score: number }) {
+  heap.push(item)
+  let index = heap.length - 1
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2)
+    const parentItem = heap[parent]
+    if (!parentItem || parentItem.score <= item.score) break
+    heap[index] = parentItem
+    index = parent
+  }
+  heap[index] = item
+}
+
+function heapDown(heap: { id: string; score: number }[], start: number) {
+  const item = heap[start]
+  if (!item) return
+  let index = start
+  while (true) {
+    const left = index * 2 + 1
+    const right = left + 1
+    let smallest = index
+    const leftItem = heap[left]
+    const smallestItem = heap[smallest]
+    if (leftItem && smallestItem && leftItem.score < smallestItem.score) smallest = left
+    const rightItem = heap[right]
+    const nextSmallestItem = heap[smallest]
+    if (rightItem && nextSmallestItem && rightItem.score < nextSmallestItem.score) smallest = right
+    if (smallest === index) break
+    const swap = heap[smallest]
+    if (!swap) break
+    heap[index] = swap
+    index = smallest
+  }
+  heap[index] = item
 }

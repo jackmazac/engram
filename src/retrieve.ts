@@ -51,9 +51,9 @@ export function scopeClause(
   scope: string | undefined,
   cfg: EngramConfig,
   projectId: string,
-): { sql: string; args: unknown[] } {
+): { sql: string; args: Array<string | number> } {
   const parts: string[] = [];
-  const args: unknown[] = [];
+  const args: Array<string | number> = [];
   const graceMs = cfg.memorySearch.scopeIncludeUnembeddedGraceHours * 3600000;
   const now = Date.now();
 
@@ -114,7 +114,7 @@ export async function searchMemory(opts: {
   const scopeArgs = sc.args;
 
   const matchStr = ftsMatchQuery(opts.query);
-  const ftsBind = [matchStr, opts.projectId, ...scopeArgs, kFts] as (string | number)[];
+  const ftsBind: Array<string | number> = [matchStr, opts.projectId, ...scopeArgs, kFts];
   const ftsStart = performance.now();
   const ftsIds = opts.db
     .query(
@@ -146,10 +146,13 @@ export async function searchMemory(opts: {
   if (!qv) throw new Error("embed: empty response");
   const qvec = new Float32Array(qv);
 
-  const vecBind = [opts.projectId, cfg.embed.model, cfg.sidecar.dimensions, ...scopeArgs] as (
-    | string
-    | number
-  )[];
+  const vecBind: Array<string | number> = [
+    opts.projectId,
+    cfg.embed.model,
+    cfg.sidecar.dimensions,
+    ...scopeArgs,
+    cfg.memorySearch.maxVectorCandidates,
+  ];
   const embRows = opts.db
     .query(
       `SELECT c.id, c.embedding AS embedding
@@ -158,7 +161,9 @@ export async function searchMemory(opts: {
          AND c.embedding_model = ?
          AND c.embedding_dimensions = ?
          AND c.embedding IS NOT NULL
-         AND (${whereScope})`,
+         AND (${whereScope})
+       ORDER BY c.time_created DESC
+       LIMIT ?`,
     )
     .iterate(...vecBind) as Iterable<{ id: string; embedding: Buffer | Uint8Array | null }>;
   const blobs = function* () {

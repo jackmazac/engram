@@ -1,8 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { queryChunksByCorrelation } from "./db.ts";
+import { isLowValueMemoryText } from "./noise.ts";
 import type { ChunkCorrelationFilters } from "./types.ts";
 
 export type ContextMode = "plan" | "implement" | "review" | "debug" | "audit" | "handoff";
+export type ContextProfile = "agent_read" | "broad";
 
 export type ContextSectionId =
   | "must_know"
@@ -85,11 +87,13 @@ export function buildContextBundle(opts: {
   query: string;
   limit: number;
   mode?: ContextMode;
+  profile?: ContextProfile;
   workspaceSignals?: WorkspaceSignals;
   budgetChars?: number;
   proactiveHintsEnabled?: boolean;
 }): ContextBundle {
   const mode = opts.mode ?? "plan";
+  const profile = opts.profile ?? "agent_read";
   const terms = expandTerms(opts.query, opts.workspaceSignals);
   const limit = Math.max(1, Math.min(opts.limit, 50));
   const correlationChunkIds = new Set(
@@ -107,6 +111,7 @@ export function buildContextBundle(opts: {
     mode,
     opts.workspaceSignals,
     correlationChunkIds,
+    profile,
   );
   const sections = buildSections(ranked, mode, limit, opts.budgetChars ?? 6000);
   // Fleet passivity: rule-based steering stays off unless the operator explicitly opts in.
@@ -393,8 +398,9 @@ function rankCandidates(
   mode: ContextMode,
   signals: WorkspaceSignals | undefined,
   correlationChunkIds: Set<string>,
+  profile: ContextProfile,
 ): ContextBundleItem[] {
-  return candidates
+  const ranked = candidates
     .map((c) => {
       const modeBoost = modeTypeBoost(mode, c.type, c.source);
       const workspaceBoost = workspaceSignalBoost(c, signals);
@@ -413,7 +419,62 @@ function rankCandidates(
       return { ...c, score, section: routeSection(mode, c), reasons };
     })
     .sort((a, b) => b.score - a.score || b.authority - a.authority);
+  if (profile === "broad") return ranked;
+  return applyAgentReadProfile(ranked, correlationChunkIds);
 }
+
+function applyAgentReadProfile(
+  items: ContextBundleItem[],
+  correlationChunkIds: Set<string>,
+): ContextBundleItem[] {
+  const rootCounts = new Map<string, number>();
+  const sourceCounts = new Map<string, number>();
+  const out: ContextBundleItem[] = [];
+  for (const item of items) {
+    if (!isAgentReadCandidate(item, correlationChunkIds)) continue;
+    const rootKey = item.rootSessionId ?? item.id;
+    const rootCount = rootCounts.get(rootKey) ?? 0;
+    if (rootCount >= 3) continue;
+    const sourceKey = item.sourceKind ?? item.source;
+    const sourceCount = sourceCounts.get(sourceKey) ?? 0;
+    if (sourceCount >= 4) continue;
+    rootCounts.set(rootKey, rootCount + 1);
+    sourceCounts.set(sourceKey, sourceCount + 1);
+    out.push(item);
+  }
+  return out;
+}
+
+function isAgentReadCandidate(
+  item: ContextBundleItem,
+  correlationChunkIds: Set<string>,
+): boolean {
+  if (correlationChunkIds.has(item.id)) return true;
+  if (item.score < 24) return false;
+  if (isLowValueMemoryText(item.text, null)) return false;
+  if (item.type === "tool_trace") return false;
+  if (item.sourceKind?.startsWith("hot_tool")) return false;
+  return durableMemoryTypes.has(item.type) || durableSources.has(item.source);
+}
+
+const durableMemoryTypes = new Set([
+  "analysis",
+  "api_contract",
+  "bug",
+  "contract",
+  "decision",
+  "invariant",
+  "milestone",
+  "migration",
+  "pattern",
+  "perf_note",
+  "plan",
+  "product_requirement",
+  "synthesis",
+  "test_strategy",
+]);
+
+const durableSources = new Set<ContextBundleItem["source"]>(["artifact", "distillation", "root"]);
 
 function buildSections(
   items: ContextBundleItem[],

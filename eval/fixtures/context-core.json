@@ -36,6 +36,13 @@
       "authority": 0,
       "sourceKind": "hot_tool:read",
       "content": "Large completed read output from unrelated file list should not appear in compiled context bundles."
+    },
+    {
+      "id": "dcp-compression-noise",
+      "type": "decision",
+      "authority": 10,
+      "sourceKind": "hot_text",
+      "content": "▣ DCP | -105.9K removed, +2.7K summary. brief persistence auto update connector compression banner should not appear in context bundles."
     }
   ],
   "queries": [
@@ -48,7 +55,7 @@
         "must_know": ["brief-durable-decision"],
         "current_risks": ["brief-stale-risk"]
       },
-      "forbidden": ["raw-read-tool-output"]
+      "forbidden": ["raw-read-tool-output", "dcp-compression-noise"]
     },
     {
       "id": "review-brief-persistence",

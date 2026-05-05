@@ -37,6 +37,24 @@ type ProactiveMemoryHit = {
   session_id: string;
 };
 
+type RuntimeInput = {
+  client: {
+    session: {
+      messages(input: {
+        path: { id: string };
+        query: { directory: string; limit: number };
+      }): Promise<{ data: unknown }>;
+      get(input: { path: { id: string }; query: { directory: string } }): Promise<{ data: unknown }>;
+      status(input: { query: { directory: string } }): Promise<{
+        data: Record<string, unknown> | undefined;
+      }>;
+    };
+  };
+  project: { id: string };
+  directory: string;
+  worktree: string;
+};
+
 export type ConflictContextArgs = {
   query: string;
   mode?: string;
@@ -103,7 +121,7 @@ function isSqliteOperationalError(error: unknown): boolean {
 export class EngramRuntime {
   db: Database;
   cfg: EngramConfig;
-  input: PluginInput;
+  input: RuntimeInput;
   key: string | undefined;
 
   private pEmbQueue!: ReturnType<Database["prepare"]>;
@@ -130,8 +148,9 @@ export class EngramRuntime {
   private lastRetrieval = new Map<string, { ids: string[]; logId: string }>();
   private archiveBusy = false;
   private embedBusy = false;
+  private writeDropped = 0;
 
-  constructor(input: PluginInput, cfg: EngramConfig) {
+  constructor(input: RuntimeInput, cfg: EngramConfig) {
     this.input = input;
     this.cfg = cfg;
     const sp = sidecarPath(input.worktree, cfg);
@@ -192,11 +211,10 @@ export class EngramRuntime {
       `UPDATE retrieval_log SET referenced_ids = ? WHERE id = ?`,
     );
 
-    const wMs = 500;
     this.timers.push(
       setInterval(() => {
         this.drainWrite();
-      }, wMs),
+      }, cfg.runtime.writeIntervalMs),
     );
     this.timers.push(
       setInterval(() => {
@@ -237,6 +255,13 @@ export class EngramRuntime {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     this.db.close();
+  }
+
+  runtimeQueueStats() {
+    return {
+      pendingRows: this.writeBuf.length,
+      droppedRows: this.writeDropped,
+    };
   }
 
   onMessageUpdated(ev: { properties?: { info?: Record<string, unknown> } }) {
@@ -372,8 +397,10 @@ export class EngramRuntime {
   private enqueue(rows: ChunkInsert[]) {
     if (!this.cfg.enabled) return;
     for (const r of rows) {
-      if (this.writeBuf.length >= this.cfg.embed.queueMax) this.drainWrite();
-      if (this.writeBuf.length >= this.cfg.embed.queueMax) this.writeBuf.shift();
+      if (this.writeBuf.length >= this.cfg.runtime.writeQueueMax) {
+        this.writeBuf.shift();
+        this.writeDropped++;
+      }
       const id = ulid();
       r.id = id;
       this.writeBuf.push(r);
@@ -382,7 +409,7 @@ export class EngramRuntime {
 
   private drainWrite() {
     if (this.writeBuf.length === 0) return;
-    const batch = this.writeBuf.splice(0, 50);
+    const batch = this.writeBuf.splice(0, this.cfg.runtime.writeBatchSize);
     this.insertRows(batch);
   }
 
@@ -578,7 +605,7 @@ export class EngramRuntime {
         this.pUpdateEmbedding.run(buf, now, cfg.embed.model, cfg.sidecar.dimensions, r.id);
       }
 
-      const classified = need.map((r) => ({
+      const classified = need.slice(0, cfg.classify.maxRowsPerDrain).map((r) => ({
         id: r.id,
         content: r.content,
         agent: r.agent,
@@ -618,8 +645,17 @@ export class EngramRuntime {
     correlation?: EngramCorrelation | null,
   ) {
     const key = this.key;
+    if (scope !== "broad" && scope !== "forensic") {
+      if (this.memoryChunkCount() === 0) return "No matching memories found.";
+      return this.contextTool({
+        query,
+        limit,
+        mode: contextMode(scope),
+        correlation,
+      });
+    }
     if (!key && this.memoryChunkCount() === 0) return "No matching memories found.";
-    if (!key) throw new Error("OPENAI_API_KEY or engram.openaiApiKey required for memory search");
+    if (!key) throw new Error("OPENAI_API_KEY or engram.openaiApiKey required for broad memory search");
     const lim = limit ?? 5;
     const start = performance.now();
     const before = memorySnapshot();
@@ -871,6 +907,7 @@ export class EngramRuntime {
         query: opts.query,
         limit: opts.limit ?? 12,
         mode: opts.mode,
+        profile: "agent_read",
         budgetChars: opts.budgetChars,
         workspaceSignals: workspaceSignalsFromCorrelation(opts.correlation),
         proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
@@ -886,6 +923,7 @@ export class EngramRuntime {
       query: opts.query,
       limit: opts.limit ?? 12,
       mode: contextMode(opts.mode),
+      profile: "agent_read",
       budgetChars: opts.budget_chars,
       workspaceSignals: workspaceSignalsFromArgs(opts, correlation),
       proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
@@ -1021,7 +1059,7 @@ Archives: ${arch.c} | export checkpoints: ${ck.c} | backfill_done: ${bf?.v ?? "0
       if (data && typeof data === "object") {
         for (const k of Object.keys(data)) {
           const s = data[k];
-          if (s && typeof s === "object" && (s.type === "busy" || s.type === "retry")) {
+          if (isRecord(s) && (s.type === "busy" || s.type === "retry")) {
             busy = true;
             break;
           }

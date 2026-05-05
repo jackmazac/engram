@@ -70,6 +70,157 @@ describe("learning modules", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("agent read context prefers durable evidence and omits raw noise", () => {
+    const dir = path.join(os.tmpdir(), `engram-agent-read-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const db = openMemoryDb(path.join(dir, "memory.db"));
+    const now = Date.now();
+    const insertChunk = db.prepare(
+      `INSERT INTO chunk (
+        id, session_id, message_id, part_id, project_id, role, agent, model, content_type, content,
+        file_paths, tool_name, tool_status, output_head, output_tail, output_length, error_class,
+        time_created, content_hash, root_session_id, session_depth, plan_slug, source_kind, source_ref, authority, superseded_by
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    insertChunk.run(
+      "durable-decision",
+      "s1",
+      "m1",
+      "p1",
+      "p1",
+      "assistant",
+      "engram-artifact",
+      null,
+      "decision",
+      "Decision: durable connector memory should preserve auto update awareness.",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      now,
+      "hash-durable",
+      "root-a",
+      0,
+      "durable-connector",
+      "journal",
+      "fixture:durable-decision",
+      10,
+      null,
+    );
+    insertChunk.run(
+      "tool-noise",
+      "s2",
+      "m2",
+      "p2",
+      "p1",
+      "assistant",
+      "executor",
+      null,
+      "tool_trace",
+      "Large completed read output mentioning durable connector auto update awareness from unrelated file list.",
+      null,
+      "read",
+      "completed",
+      null,
+      null,
+      null,
+      null,
+      now + 1,
+      "hash-tool",
+      "root-b",
+      0,
+      null,
+      "hot_tool:read",
+      "fixture:tool-noise",
+      0,
+      null,
+    );
+    insertChunk.run(
+      "dcp-noise",
+      "s3",
+      "m3",
+      "p3",
+      "p1",
+      "assistant",
+      "executor",
+      null,
+      "decision",
+      "▣ DCP | -105.9K removed, +2.7K summary durable connector auto update awareness",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      now + 2,
+      "hash-dcp",
+      "root-c",
+      0,
+      null,
+      "hot_text",
+      "fixture:dcp-noise",
+      10,
+      null,
+    );
+
+    const bundle = buildContextBundle({
+      db,
+      projectId: "p1",
+      query: "durable connector auto update awareness",
+      mode: "plan",
+      limit: 5,
+      profile: "agent_read",
+    });
+    const ids = bundle.sections.flatMap((section) => section.items.map((item) => item.id));
+    expect(ids).toContain("durable-decision");
+    expect(ids).not.toContain("tool-noise");
+    expect(ids).not.toContain("dcp-noise");
+    expect(formatContextBundle(bundle)).toContain("journal");
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("splits plan artifacts into heading sections", () => {
+    const dir = path.join(os.tmpdir(), `engram-artifact-sections-${Date.now()}`);
+    mkdirSync(path.join(dir, ".opencode", "plans"), { recursive: true });
+    writeFileSync(
+      path.join(dir, ".opencode", "plans", "brief-persistence.md"),
+      "# Brief Persistence\n\n## Durable Connector\nKeep connector awareness.\n\n## Retry Risk\nAvoid stale retries.",
+    );
+    const db = openMemoryDb(path.join(dir, "memory.db"));
+
+    const dry = ingestArtifacts({
+      db,
+      worktree: dir,
+      projectId: "p1",
+      cfg: defaultEngramConfig,
+      dryRun: true,
+    });
+    expect(dry.items).toBe(2);
+
+    const applied = ingestArtifacts({
+      db,
+      worktree: dir,
+      projectId: "p1",
+      cfg: defaultEngramConfig,
+      dryRun: false,
+    });
+    expect(applied.chunksInserted).toBe(2);
+    const titles = db
+      .prepare(`SELECT title FROM artifact_item WHERE project_id = ? ORDER BY title`)
+      .values("p1")
+      .flatMap((row) => row);
+    expect(titles).toEqual(["Durable Connector", "Retry Risk"]);
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("indexes hot roots, backfills signals, distills, and builds relations", () => {
     const dir = path.join(os.tmpdir(), `engram-learning-hot-${Date.now()}`);
     mkdirSync(dir, { recursive: true });

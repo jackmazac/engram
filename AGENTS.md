@@ -11,7 +11,7 @@ Engram owns local engineering memory:
 - Capture and backfill from OpenCode sessions.
 - Sidecar SQLite schema and migrations, including the `chunk_correlation` fleet correlation table.
 - Hybrid memory search (FTS + streaming vector + RRF + optional rerank).
-- Context compilation through `memory_context` and `engram context` (passive by default).
+- Context compilation through `memory`, `memory_context`, and `engram context` (high-precision and passive by default).
 - Fleet correlation retrieval through `conflict_context` (native plugin tool, Wave 3).
 - Artifact ingestion through `lifecycle_ingest` (native plugin tool, Wave 3) and `engram ingest-artifacts` CLI.
 - Eval fixtures and drift reports.
@@ -43,7 +43,7 @@ Conductor integration must stay optional and contract-based. Use `src/bridge-con
 - Privacy/capture policy should be structural and cheap. Avoid broad regex sweeps over large outputs in hot paths.
 - Mutating CLI workflows must be dry-run by default unless already documented as safe.
 - `memory_context` is passive by default. Do not re-enable proactive injection in default config. The `context.proactiveHints.enabled` gate must be respected throughout the codebase.
-- Embeddings, classification, and rerank require an OpenAI API key. All local-only paths (`conflict_context`, `lifecycle_ingest`, `forget`, `stats`, `memory` without rerank) must remain fully functional without one.
+- Embeddings, classification, rerank, and broad hybrid memory search require an OpenAI API key. Local context paths (`memory`, `memory_context`, `conflict_context`, `lifecycle_ingest`, `forget`, `stats`) must remain fully functional without one.
 
 ## Repository Map
 
@@ -87,7 +87,7 @@ Conductor integration must stay optional and contract-based. Use `src/bridge-con
 
 ## Context Compiler Rules
 
-`memory_context` and `engram context` are the flagship Engram surfaces.
+`memory`, `memory_context`, and `engram context` are the flagship Engram surfaces. The default profile is high precision: prefer artifact-backed plans, journals, audits, progress, root distillations, decisions, contracts, bugs, invariants, and test strategy; filter or demote raw hot DB tool/session noise unless it is explicitly requested or correlated.
 
 Context bundles should answer:
 
@@ -111,6 +111,8 @@ Supported modes:
 Every context item should include a useful `why` explanation. Keep this debuggable and deterministic.
 
 Do not reintroduce query expansion unless the user explicitly approves it. The prior approval excluded rank 8 query expansion, rank 9 context cache, and rank 10 additional raw backfill.
+
+`memory` without `scope` should return the same evidence-oriented context shape as `memory_context`. Use `scope: "broad"` or `scope: "forensic"` only for raw hybrid search when an agent explicitly needs lower-level session evidence.
 
 ## Fleet Correlation (chunk_correlation Sidecar)
 
@@ -247,7 +249,7 @@ Expected public fixture quality should remain 100% unless a deliberate fixture o
 - Error output is captured when `capture.policy.captureErrorToolOutput` is enabled, bounded by `maxToolOutputLength`.
 - Prefer artifact ingestion before hot DB backfill.
 - Prefer `backfill-hot --strategy priority` or `artifact-linked` over legacy chronological backfill.
-- Legacy auto backfill is delayed by default and should never block startup.
+- Legacy auto backfill is opt-in and must never run in the live plugin runtime by default.
 
 ## Telemetry And Logging Rules
 

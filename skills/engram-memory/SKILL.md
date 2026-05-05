@@ -21,7 +21,7 @@ Use this skill when working in a project that has the Engram OpenCode plugin ins
 
 For non-trivial project work, compile context before acting.
 
-Use `memory_context` first for planning, implementation, review, debugging, audits, and handoffs. Use `memory` only when you need a precise lookup or more raw evidence.
+Use `memory_context` first for planning, implementation, review, debugging, audits, and handoffs. Use `memory` for a high-precision lookup in the same evidence-bundle style. Use `memory` with `scope: "broad"` or `scope: "forensic"` only when you need raw hybrid search over lower-level session evidence.
 
 Skip Engram for tiny one-off edits where prior project context is unlikely to matter.
 
@@ -30,7 +30,8 @@ Skip Engram for tiny one-off edits where prior project context is unlikely to ma
 | Need                                           | Tool              |
 | ---------------------------------------------- | ----------------- |
 | Preflight context for a task                   | `memory_context`  |
-| Specific past decision or detail               | `memory`          |
+| Specific past decision or durable detail       | `memory`          |
+| Raw session/tool evidence for investigation    | `memory` with `scope: "broad"` or `"forensic"` |
 | Mark a retrieved memory useful or stale        | `memory_feedback` |
 | Check memory health, telemetry, or eval status | `stats`           |
 
@@ -68,7 +69,7 @@ Engram context bundles are sectioned. Treat sections differently.
 | Evidence               | Supporting memories and source IDs. Use for verification, citations, and deeper lookup.          |
 | Suggested Next Steps   | Rule-based suggestions. Treat as guidance, not a substitute for judgment.                        |
 
-Every item includes `why:` reasons. Prefer high-authority artifact-backed memories over raw chat snippets or tool traces.
+Every item includes `why:` reasons. Prefer high-authority artifact-backed memories over raw chat snippets or tool traces. The default read path filters known low-value patterns such as DCP compression banners, progress-only output, and subagent task assignment boilerplate.
 
 ## Planning Workflow
 
@@ -86,7 +87,7 @@ Before editing code in a known domain:
 1. Call `memory_context` with `mode: "implement"`.
 2. Check API contracts, invariants, migration notes, and prior successful paths.
 3. Keep changes aligned with high-authority memory unless the user directs otherwise.
-4. Use `memory` for exact evidence when a bundle item is too brief.
+4. Use `memory` for exact durable evidence when a bundle item is too brief; use broad/forensic scope only when the task needs raw session details.
 
 ## Review Workflow
 
@@ -103,7 +104,7 @@ When debugging:
 
 1. Call `memory_context` with `mode: "debug"` using the error or symptom.
 2. Look for prior root-cause fixes, failed commands, perf notes, and similar bugs.
-3. If nothing relevant appears, use `memory` with narrower terms.
+3. If nothing relevant appears, use `memory` with narrower terms; switch to broad/forensic scope only when raw session evidence is worth the noise.
 4. After resolving, ensure durable conclusions are captured via normal project artifacts or summary.
 
 ## Feedback
@@ -147,6 +148,7 @@ Good Engram usage should produce:
 ## Guardrails
 
 - Do not treat low-authority raw tool traces as canonical.
+- Do not default to broad/forensic search for ordinary planning, implementation, review, or debugging.
 - Do not override high-authority decisions/contracts without user approval.
 - Do not add sqlite-vec, fallback vector backends, or memory architecture changes unless the user explicitly approves them and eval/telemetry justify the work.
 - Do not dump large context bundles into prompts; ask for focused context with an appropriate mode and limit.

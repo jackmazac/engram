@@ -1,5 +1,6 @@
 import type { EngramConfig } from "./config.ts";
 import { contentHash, normalizeForHash } from "./hash.ts";
+import { isLowValueMemoryText } from "./noise.ts";
 import type { ChunkInsert, EngramCorrelation } from "./types.ts";
 
 function provisionalType(agent: string): string {
@@ -49,6 +50,7 @@ export function fromPart(
   if (t === "text" && cfg.capture.assistantText) {
     const text = part.text as string;
     if (!text?.trim()) return [];
+    if (isLowValueMemoryText(text, agent)) return [];
     const h = contentHash(text);
     return [
       {

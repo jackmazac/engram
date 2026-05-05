@@ -21,13 +21,19 @@ describe("migrations and FTS", () => {
     const cols = d2.query(`PRAGMA table_info(chunk)`).all() as { name: string }[];
     const logCols = d2.query(`PRAGMA table_info(log_event)`).all() as { name: string }[];
     expect(v1).toBe(v2);
-    expect(v2).toBe(13);
+    expect(v2).toBe(14);
     expect(cols.map((c) => c.name)).toContain("embedding_model");
     expect(cols.map((c) => c.name)).toContain("embedding_dimensions");
     expect(cols.map((c) => c.name)).toContain("source_kind");
     expect(cols.map((c) => c.name)).toContain("authority");
     expect(logCols.map((c) => c.name)).toContain("category");
     expect(logCols.map((c) => c.name)).toContain("workspace_id");
+    expect(d2.query(`PRAGMA table_info(backfill_job)`).all()).toContainEqual(
+      expect.objectContaining({ name: "status" }),
+    );
+    expect(d2.query(`PRAGMA table_info(backfill_job)`).all()).toContainEqual(
+      expect.objectContaining({ name: "cursor_json" }),
+    );
     d2.close();
     unlinkSync(p);
   });

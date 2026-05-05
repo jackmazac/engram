@@ -37,7 +37,7 @@ export const EngramPlugin: Plugin = async (input) => {
             .string()
             .optional()
             .describe(
-              "Narrow: decisions | errors | plans | contracts | recent — omit for broad search",
+              "Default is high-precision agent context. Use broad or forensic for raw hybrid search; other values map to context mode/scope hints.",
             ),
           limit: z.number().optional().describe("Max results (default 5, max 10)"),
         },

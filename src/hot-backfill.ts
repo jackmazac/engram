@@ -1,7 +1,15 @@
 import { Database } from "bun:sqlite"
 import { ulid } from "ulid"
 import type { EngramConfig } from "./config.ts"
-import { applyConnPragmas } from "./db.ts"
+import {
+  applyConnPragmas,
+  createBackfillJob,
+  finishBackfillJob,
+  leaseBackfillJob,
+  readBackfillJob,
+  updateBackfillJobProgress,
+  type BackfillJobRow,
+} from "./db.ts"
 import { contentHash } from "./hash.ts"
 
 export type BackfillStrategy = "artifact-linked" | "priority" | "recent" | "errors" | "patches"
@@ -11,6 +19,11 @@ export type HotBackfillSummary = {
   roots: number
   scannedParts: number
   chunksInserted: number
+}
+
+export type HotBackfillJobResult = {
+  summary: HotBackfillSummary
+  job: BackfillJobRow
 }
 
 type Root = { root_session_id: string; priority_score: number }
@@ -36,6 +49,7 @@ export function backfillHot(opts: {
         opts.projectId,
         root.root_session_id,
         opts.strategy,
+        opts.cfg.backfill.maxSessionsPerRoot,
         opts.maxParts - candidates.length,
       )) {
         candidates.push(part)
@@ -57,8 +71,77 @@ export function backfillHot(opts: {
   }
 }
 
+export function runBackfillHotJob(opts: {
+  db: Database
+  hotPath: string
+  projectId: string
+  cfg: EngramConfig
+  strategy: BackfillStrategy
+  dryRun: boolean
+  maxRoots: number
+  maxParts: number
+  leaseOwner: string
+  leaseMs?: number
+  now?: number
+}): HotBackfillJobResult {
+  const now = opts.now ?? Date.now()
+  const job = createBackfillJob(opts.db, {
+    projectId: opts.projectId,
+    kind: "hot",
+    strategy: opts.strategy,
+    cursor: null,
+    now,
+  })
+  const leased = leaseBackfillJob(opts.db, {
+    jobId: job.id,
+    leaseOwner: opts.leaseOwner,
+    leaseMs: opts.leaseMs ?? 60_000,
+    now,
+  })
+  if (!leased) throw new Error(`backfill job lease failed: ${job.id}`)
+
+  try {
+    const summary = backfillHot(opts)
+    updateBackfillJobProgress(opts.db, {
+      jobId: job.id,
+      cursor: {
+        strategy: opts.strategy,
+        maxRoots: opts.maxRoots,
+        maxParts: opts.maxParts,
+      },
+      processedRoots: summary.roots,
+      processedParts: summary.scannedParts,
+      insertedChunks: summary.chunksInserted,
+      now,
+    })
+    const finished = finishBackfillJob(opts.db, { jobId: job.id, status: "completed", now })
+    if (!finished) throw new Error(`backfill job finish failed: ${job.id}`)
+    return { summary, job: finished }
+  } catch (error) {
+    finishBackfillJob(opts.db, {
+      jobId: job.id,
+      status: "failed",
+      errorSummary: error instanceof Error ? error.message : String(error),
+      now,
+    })
+    const failed = readBackfillJob(opts.db, job.id)
+    if (failed) return { summary: emptySummary(opts), job: failed }
+    throw error
+  }
+}
+
 export function formatHotBackfillSummary(s: HotBackfillSummary): string {
   return `Hot backfill ${s.dryRun ? "dry-run" : "applied"} strategy=${s.strategy} roots=${s.roots} scannedParts=${s.scannedParts} chunksInserted=${s.chunksInserted}`
+}
+
+function emptySummary(opts: { dryRun: boolean; strategy: BackfillStrategy }): HotBackfillSummary {
+  return {
+    dryRun: opts.dryRun,
+    strategy: opts.strategy,
+    roots: 0,
+    scannedParts: 0,
+    chunksInserted: 0,
+  }
 }
 
 type Candidate = {
@@ -111,6 +194,7 @@ function rootCandidates(
   projectId: string,
   rootId: string,
   strategy: BackfillStrategy,
+  maxSessions: number,
   limit: number,
 ): Candidate[] {
   if (limit <= 0) return []
@@ -119,9 +203,9 @@ function rootCandidates(
       `WITH RECURSIVE t(id) AS (
          SELECT id FROM session WHERE id = ? AND project_id = ?
          UNION ALL SELECT s.id FROM session s INNER JOIN t ON s.parent_id = t.id
-       ) SELECT id FROM t`,
+       ) SELECT id FROM t LIMIT ?`,
     )
-    .all(rootId, projectId) as { id: string }[]
+    .all(rootId, projectId, maxSessions) as { id: string }[]
   const ids = sessions.map((s) => s.id)
   if (ids.length === 0) return []
   const placeholders = ids.map(() => "?").join(",")

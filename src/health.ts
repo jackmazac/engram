@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import type { EngramConfig } from "./config.ts";
-import { checkSidecarHealth } from "./db.ts";
+import { applyConnPragmas, checkSidecarHealth, countStaleBackfillJobs } from "./db.ts";
 
 export type EngramHealthStatus = "pass" | "warn" | "fail" | "skip";
 
@@ -41,9 +42,25 @@ export function buildEngramHealthReport(opts: {
       ? "telemetry retention is enabled"
       : "telemetry is disabled",
   });
+  checks.push({
+    name: "runtime auto backfill",
+    status: opts.cfg.backfill.auto ? "warn" : "pass",
+    message: opts.cfg.backfill.auto
+      ? "legacy hot DB backfill is enabled in the live runtime"
+      : "legacy hot DB backfill is opt-in and disabled for runtime safety",
+  });
+  checks.push({
+    name: "broad vector candidate cap",
+    status: opts.cfg.memorySearch.maxVectorCandidates > 0 ? "pass" : "warn",
+    message:
+      opts.cfg.memorySearch.maxVectorCandidates > 0
+        ? `broad vector search is capped at ${opts.cfg.memorySearch.maxVectorCandidates} candidates`
+        : "broad vector search has no candidate cap",
+  });
   checks.push(sidecarHealthCheck(opts.sidecarPath));
   checks.push(sizeCheck("sidecar size", opts.sidecarPath, LARGE_DB_BYTES));
   checks.push(sizeCheck("sidecar WAL size", `${opts.sidecarPath}-wal`, LARGE_WAL_BYTES));
+  checks.push(staleBackfillJobsCheck(opts.sidecarPath));
 
   const summary = summarize(checks);
   return {
@@ -85,6 +102,28 @@ function sizeCheck(name: string, path: string, warnBytes: number): EngramHealthC
     message: `${formatBytes(bytes)} at ${path}`,
     details: { bytes, warnBytes },
   };
+}
+
+function staleBackfillJobsCheck(path: string): EngramHealthCheck {
+  if (!existsSync(path)) return { name: "stale backfill jobs", status: "skip", message: "sidecar not found" };
+  try {
+    const db = new Database(path, { readonly: true });
+    applyConnPragmas(db);
+    const stale = countStaleBackfillJobs(db);
+    db.close();
+    return {
+      name: "stale backfill jobs",
+      status: stale > 0 ? "warn" : "pass",
+      message: stale > 0 ? `${stale} running backfill job lease(s) have expired` : "none",
+      details: { stale },
+    };
+  } catch (error) {
+    return {
+      name: "stale backfill jobs",
+      status: "warn",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function summarize(checks: EngramHealthCheck[]): Record<EngramHealthStatus, number> {

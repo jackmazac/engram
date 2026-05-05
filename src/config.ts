@@ -42,6 +42,7 @@ const classify = z.object({
   model: z.string().default("gpt-5.4-nano"),
   enabled: z.boolean().default(true),
   typeProposalThreshold: z.number().int().positive().default(10),
+  maxRowsPerDrain: z.number().int().positive().default(25),
 });
 
 const embed = z.object({
@@ -50,6 +51,12 @@ const embed = z.object({
   intervalMs: z.number().int().positive().default(5000),
   queueMax: z.number().int().positive().default(500),
   cacheByHash: z.boolean().default(true),
+});
+
+const runtime = z.object({
+  writeIntervalMs: z.number().int().positive().default(500),
+  writeBatchSize: z.number().int().positive().default(50),
+  writeQueueMax: z.number().int().positive().default(500),
 });
 
 const rerank = z.object({
@@ -87,6 +94,7 @@ const memorySearch = z.object({
   kFts: z.number().int().positive().default(50),
   kVec: z.number().int().positive().default(30),
   kRerank: z.number().int().positive().default(20),
+  maxVectorCandidates: z.number().int().positive().default(5000),
   scopeIncludeUnembeddedGraceHours: z.number().nonnegative().default(24),
   forgetPatternMaxRows: z.number().int().positive().default(500),
 });
@@ -102,10 +110,11 @@ const context = z.object({
 const backfillCfg = z.object({
   enabled: z.boolean().default(true),
   lookbackDays: z.number().int().positive().default(90),
-  auto: z.boolean().default(true),
+  auto: z.boolean().default(false),
   repeat: z.boolean().default(false),
   intervalMs: z.number().int().positive().default(60_000),
   startupDelayMs: z.number().int().nonnegative().default(60_000),
+  maxSessionsPerRoot: z.number().int().positive().default(500),
 });
 
 const telemetry = z.object({
@@ -160,6 +169,7 @@ export const EngramConfig = z.object({
   capture,
   classify,
   embed,
+  runtime,
   rerank,
   proactive,
   hints,
@@ -204,6 +214,7 @@ export const defaultEngramConfig = EngramConfig.parse({
     model: "gpt-5.4-nano",
     enabled: true,
     typeProposalThreshold: 10,
+    maxRowsPerDrain: 25,
   },
   embed: {
     model: "text-embedding-3-small",
@@ -211,6 +222,11 @@ export const defaultEngramConfig = EngramConfig.parse({
     intervalMs: 5000,
     queueMax: 500,
     cacheByHash: true,
+  },
+  runtime: {
+    writeIntervalMs: 500,
+    writeBatchSize: 50,
+    writeQueueMax: 500,
   },
   rerank: {
     model: "gpt-5.4-nano",
@@ -245,6 +261,7 @@ export const defaultEngramConfig = EngramConfig.parse({
     kFts: 50,
     kVec: 30,
     kRerank: 20,
+    maxVectorCandidates: 5000,
     scopeIncludeUnembeddedGraceHours: 24,
     forgetPatternMaxRows: 500,
   },
@@ -256,10 +273,11 @@ export const defaultEngramConfig = EngramConfig.parse({
   backfill: {
     enabled: true,
     lookbackDays: 90,
-    auto: true,
+    auto: false,
     repeat: false,
     intervalMs: 60_000,
     startupDelayMs: 60_000,
+    maxSessionsPerRoot: 500,
   },
   telemetry: {
     enabled: true,

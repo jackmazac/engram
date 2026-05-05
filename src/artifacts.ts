@@ -303,11 +303,57 @@ function parseSource(source: Source, raw: string, mtime: number): Item[] {
   if (source.kind === "lifecycle" || source.kind === "concord_collision") {
     return [parseStructuredArtifact(source, raw, mtime)].filter((x) => x.content);
   }
+  if (source.kind === "plan" || source.kind === "audit") return parseMarkdownArtifact(source, raw, mtime);
   const title = firstTitle(raw) ?? path.basename(source.rel);
   const slug = path.basename(source.rel).replace(/\.[^.]+$/, "");
   return [{ kind: source.kind, title, slug, content: raw.trim(), time: Math.floor(mtime) }].filter(
     (x) => x.content,
   );
+}
+
+function parseMarkdownArtifact(source: Source, raw: string, mtime: number): Item[] {
+  const fallbackTitle = firstTitle(raw) ?? path.basename(source.rel);
+  const baseSlug = path.basename(source.rel).replace(/\.[^.]+$/, "");
+  const sections = markdownSections(raw);
+  if (sections.length === 0) {
+    return [
+      {
+        kind: source.kind,
+        title: fallbackTitle,
+        slug: baseSlug,
+        content: raw.trim(),
+        time: Math.floor(mtime),
+      },
+    ].filter((x) => x.content);
+  }
+  return sections
+    .map((section) => ({
+      kind: source.kind,
+      title: section.title,
+      slug: `${baseSlug}-${slugify(section.title)}`,
+      content: section.content,
+      time: Math.floor(mtime),
+    }))
+    .filter((x) => x.content);
+}
+
+function markdownSections(raw: string): Array<{ title: string; content: string }> {
+  const lines = raw.split(/\r?\n/);
+  const sections: Array<{ title: string; lines: string[] }> = [];
+  let current: { title: string; lines: string[] } | null = null;
+  for (const line of lines) {
+    if (/^##\s+/.test(line) && !/^###\s+/.test(line)) {
+      if (current?.lines.join("\n").trim()) sections.push(current);
+      current = { title: line.replace(/^##\s+/, "").trim(), lines: [line] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  if (current?.lines.join("\n").trim()) sections.push(current);
+  return sections.map((section) => ({
+    title: section.title,
+    content: section.lines.join("\n").trim(),
+  }));
 }
 
 function parseStructuredArtifact(source: Source, raw: string, mtime: number): Item {
@@ -426,6 +472,14 @@ function firstTitle(raw: string): string | null {
     if (t) return t.slice(0, 120);
   }
   return null;
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "section";
 }
 
 function sha256(s: string): string {

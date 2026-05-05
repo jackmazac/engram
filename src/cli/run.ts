@@ -36,7 +36,7 @@ import {
 import { distillRoots, formatDistillSummary } from "../distill.ts";
 import { formatContextEvalReport, formatEvalReport, runContextEval, runEval } from "../eval.ts";
 import { buildEngramHealthReport, formatEngramHealthReport } from "../health.ts";
-import { backfillHot, formatHotBackfillSummary, type BackfillStrategy } from "../hot-backfill.ts";
+import { formatHotBackfillSummary, runBackfillHotJob, type BackfillStrategy } from "../hot-backfill.ts";
 import {
   formatEventReport,
   recentLogEvents,
@@ -341,7 +341,7 @@ async function main() {
       process.exit(1);
     }
     const strategy = (valueArg(argv, "--strategy") ?? "priority") as BackfillStrategy;
-    const summary = backfillHot({
+    const result = runBackfillHotJob({
       db: memoryDb,
       hotPath: hot,
       projectId: pid,
@@ -350,8 +350,9 @@ async function main() {
       dryRun: !argv.includes("--apply"),
       maxRoots: numberArg(argv, "--max-roots", 10),
       maxParts: numberArg(argv, "--max-parts", 500),
+      leaseOwner: "engram-cli",
     });
-    console.log(formatHotBackfillSummary(summary));
+    console.log(formatHotBackfillSummary(result.summary));
     memoryDb.close();
     return;
   }
