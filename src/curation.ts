@@ -17,7 +17,13 @@ type Proposal = {
   score: number
 }
 
-export function runCuration(opts: { db: Database; projectId: string; apply: boolean; max: number }): CurationSummary {
+export function runCuration(opts: {
+  db: Database
+  projectId: string
+  apply: boolean
+  max: number
+  record?: boolean
+}): CurationSummary {
   const proposals = buildProposals(opts.db, opts.projectId, opts.max)
   const runId = ulid()
   const duplicateGroups = new Set(proposals.filter((p) => p.duplicateOf).map((p) => p.duplicateOf)).size
@@ -28,6 +34,9 @@ export function runCuration(opts: { db: Database; projectId: string; apply: bool
     duplicateChunks: proposals.filter((p) => p.action === "delete_duplicate").length,
     lowValueChunks: proposals.filter((p) => p.action === "review_low_value").length,
   }
+
+  const shouldWrite = opts.apply || opts.record === true
+  if (!shouldWrite) return summary
 
   const insRun = opts.db.prepare(
     `INSERT INTO curation_run (id, project_id, mode, applied, summary_json, time_created) VALUES (?,?,?,?,?,?)`,

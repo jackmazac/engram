@@ -13,6 +13,10 @@ Exports:
 - `opencode-engram/bridge` — optional bridge schemas and types.
 - `skills/engram-memory/SKILL.md` — optional OpenCode agent skill that teaches agents how to use Engram effectively.
 
+Package dependencies must resolve from the public package manifest before publish. Shared fleet contracts live in `@jackmazac/opencode-fleet-contracts`; Host Adapter owns plugin boundary wrapping and validation. Do not duplicate either implementation inside Engram.
+
+Publish follow-up: `ENGRAM-PKG-001` tracks replacing local `file:` development dependencies on `@jackmazac/opencode-fleet-contracts` and `@jackmazac/opencode-host-adapter` with registry or otherwise installable package specs after those owning packages are published. Until then, `npm pack --dry-run` verifies package contents, but publishing is blocked by the local dependency specs.
+
 Operational logs are intentionally stored in the sidecar as bounded `log_event` rows. Use `engram telemetry --events` or `engram dashboard --json` rather than depending on the table shape from companion packages.
 
 Install the skill globally by copying `skills/engram-memory/SKILL.md` to `~/.config/opencode/skills/engram-memory/SKILL.md`, or project-locally by copying it to `.opencode/skills/engram-memory/SKILL.md`.

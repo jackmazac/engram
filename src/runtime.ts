@@ -1,7 +1,6 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import { Database } from "bun:sqlite";
 import { ulid } from "ulid";
-import { decodeFleetContext, fleetContextToJson } from "@jackmazac/opencode-fleet-contracts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,7 +16,8 @@ import type { ChunkInsert, EngramCorrelation } from "./types.ts";
 import { embedTexts, resolveApiKey } from "./openai.ts";
 import { classifyBatch } from "./classify.ts";
 import { buildContextBundle, formatContextBundle, type ContextMode } from "./context.ts";
-import { EngramLogger, formatEventReport, pruneLogEvents, recentLogEvents } from "./logger.ts";
+import { correlationFromUnknown, correlationToDetail } from "./fleet.ts";
+import { EngramLogger, formatEventReport, recentLogEvents } from "./logger.ts";
 import { formatHits, searchMemory } from "./retrieve.ts";
 import {
   ORCHESTRATOR_HINT_BLOCK,
@@ -27,7 +27,6 @@ import {
 import {
   formatTelemetryReport,
   memorySnapshot,
-  pruneMetrics,
   recentMetrics,
   recordMetric as insertMetric,
 } from "./telemetry.ts";
@@ -69,8 +68,12 @@ export type ConflictContextArgs = {
   tool_call_id?: string;
   spine_seq?: number;
   artifact_ref?: string;
+  artifact_refs?: string[];
   lifecycle_object_id?: string;
+  lifecycle_object_ids?: string[];
   concord_event_id?: string;
+  concord_event_ids?: string[];
+  correlation?: EngramCorrelation | null;
 };
 
 export async function buildProactiveMemoryBlock(opts: {
@@ -512,7 +515,7 @@ export class EngramRuntime {
         bytesCount,
         before,
         after: memorySnapshot(),
-        detail: detailWithCorrelation(detail, correlation),
+        detail: correlationToDetail(detail, correlation),
         correlation,
         detailMaxLength: this.cfg.telemetry.detailMaxLength,
       });
@@ -677,6 +680,13 @@ export class EngramRuntime {
         key,
         skipRerank: false,
         correlation,
+        onRerankFailure: (error, rerank) => {
+          this.logger.warn("retrieval", "rerank_failed", {
+            model: rerank.model,
+            candidateCount: rerank.candidateCount,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
       });
       hitCount = hits.length;
       detail = { ...detail, ...metrics };
@@ -781,6 +791,14 @@ export class EngramRuntime {
           limit: this.cfg.proactive.maxChunks,
           key,
           skipRerank: this.cfg.proactive.skipRerank,
+          onRerankFailure: (error, rerank) => {
+            this.logger.warn("retrieval", "rerank_failed", {
+              model: rerank.model,
+              candidateCount: rerank.candidateCount,
+              proactive: true,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          },
         });
         return hits;
       },
@@ -900,8 +918,9 @@ export class EngramRuntime {
     budgetChars?: number;
     correlation?: EngramCorrelation | null;
   }) {
-    return formatContextBundle(
-      buildContextBundle({
+    const start = performance.now();
+    const before = memorySnapshot();
+    const bundle = buildContextBundle({
         db: this.db,
         projectId: this.input.project.id,
         query: opts.query,
@@ -911,13 +930,24 @@ export class EngramRuntime {
         budgetChars: opts.budgetChars,
         workspaceSignals: workspaceSignalsFromCorrelation(opts.correlation),
         proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
-      }),
+      });
+    this.recordMetric(
+      "context.compile",
+      "ok",
+      performance.now() - start,
+      bundle.metrics?.items ?? 0,
+      null,
+      before,
+      { queryLength: opts.query.length, mode: bundle.mode, ...bundle.metrics },
+      opts.correlation,
     );
+    return formatContextBundle(bundle);
   }
 
   runConflictContext(opts: ConflictContextArgs) {
-    const correlation = correlationFromUnknown(opts);
-    return buildContextBundle({
+    const start = performance.now();
+    const before = memorySnapshot();
+    const bundle = buildContextBundle({
       db: this.db,
       projectId: this.input.project.id,
       query: opts.query,
@@ -925,9 +955,20 @@ export class EngramRuntime {
       mode: contextMode(opts.mode),
       profile: "agent_read",
       budgetChars: opts.budget_chars,
-      workspaceSignals: workspaceSignalsFromArgs(opts, correlation),
+      workspaceSignals: workspaceSignalsFromArgs(opts, opts.correlation ?? null),
       proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
     });
+    this.recordMetric(
+      "context.compile",
+      "ok",
+      performance.now() - start,
+      bundle.metrics?.items ?? 0,
+      null,
+      before,
+      { queryLength: opts.query.length, mode: bundle.mode, conflictContext: true, ...bundle.metrics },
+      opts.correlation,
+    );
+    return bundle;
   }
 
   runLifecycleIngest(opts: {
@@ -992,8 +1033,6 @@ Archives: ${arch.c} | export checkpoints: ${ck.c} | backfill_done: ${bf?.v ?? "0
     }
 
     if (report === "telemetry") {
-      pruneMetrics(this.db, pid, this.cfg.telemetry.retainDays);
-      pruneLogEvents(this.db, pid, this.cfg.telemetry.eventRetainDays);
       return [
         formatTelemetryReport(recentMetrics(this.db, pid, 200), "last 200"),
         formatEventReport(
@@ -1075,6 +1114,7 @@ Archives: ${arch.c} | export checkpoints: ${ck.c} | backfill_done: ${bf?.v ?? "0
       this.input.project.id,
       this.cfg.archive.staleDays,
       Date.now(),
+      1,
     );
     const root = roots[0];
     if (!root) return;
@@ -1105,59 +1145,6 @@ function chunkIdentityKey(
 function extractSlug(out: string): string | null {
   const m = out.match(/slug[:\s]+([\w-]+)/i);
   return m?.[1] ?? null;
-}
-
-export function correlationFromUnknown(...values: unknown[]): EngramCorrelation | null {
-  const raw: Record<string, unknown> = {};
-  for (const value of values) collectCorrelationFields(raw, value);
-  const decoded = decodeFleetContext(raw);
-  return decoded.ok ? decoded.value : null;
-}
-
-function collectCorrelationFields(target: Record<string, unknown>, value: unknown): void {
-  if (!isRecord(value)) return;
-  copyKnownCorrelationFields(target, value);
-  const metadata = recordValue(value, "metadata");
-  if (metadata) copyKnownCorrelationFields(target, metadata);
-  const fleet = recordValue(value, "fleet") ?? recordValue(metadata, "fleet");
-  if (fleet) copyKnownCorrelationFields(target, fleet);
-  const properties = recordValue(value, "properties");
-  if (properties) collectCorrelationFields(target, properties);
-}
-
-function copyKnownCorrelationFields(
-  target: Record<string, unknown>,
-  source: Record<string, unknown>,
-): void {
-  for (const key of [
-    "workspace_id",
-    "workspaceId",
-    "plan_id",
-    "planId",
-    "plan_slug",
-    "planSlug",
-    "wave_id",
-    "waveId",
-    "agent_run_id",
-    "agentRunId",
-    "correlation_id",
-    "correlationId",
-    "tool_call_id",
-    "toolCallId",
-    "spine_seq",
-    "spineSeq",
-    "artifact_ref",
-    "artifactRef",
-    "lifecycle_object_id",
-    "lifecycleObjectId",
-    "concord_event_id",
-    "concordEventId",
-    "fleet_run_id",
-    "fleetRunId",
-  ]) {
-    const value = source[key];
-    if (value !== undefined) target[key] = value;
-  }
 }
 
 function workspaceSignalsFromCorrelation(correlation: EngramCorrelation | null | undefined) {
@@ -1193,8 +1180,11 @@ function workspaceSignalsFromArgs(
     toolCallId: args.tool_call_id ?? base?.toolCallId,
     spineSeq: args.spine_seq ?? base?.spineSeq,
     artifactRef: args.artifact_ref ?? base?.artifactRef,
+    artifactRefs: args.artifact_refs,
     lifecycleObjectId: args.lifecycle_object_id ?? base?.lifecycleObjectId,
+    lifecycleObjectIds: args.lifecycle_object_ids,
     concordEventId: args.concord_event_id ?? base?.concordEventId,
+    concordEventIds: args.concord_event_ids,
   };
 }
 
@@ -1211,14 +1201,6 @@ function contextMode(raw: string | undefined): ContextMode | undefined {
   return undefined;
 }
 
-function detailWithCorrelation(
-  detail: Record<string, unknown> | null,
-  correlation: EngramCorrelation | null | undefined,
-): Record<string, unknown> | null {
-  if (!correlation) return detail;
-  return { ...(detail ?? {}), fleet: fleetContextToJson(correlation) };
-}
-
 function stringOrUndefined(value: string | number | null): string | undefined {
   if (value === null) return undefined;
   return String(value);
@@ -1226,12 +1208,6 @@ function stringOrUndefined(value: string | number | null): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function recordValue(value: unknown, key: string): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const nested = value[key];
-  return isRecord(nested) ? nested : null;
 }
 
 function isCountRow(value: unknown): value is { c: number } {

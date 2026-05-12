@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { ulid } from "ulid";
 import type { EngramConfig } from "./config.ts";
 import type { EngramCorrelation } from "./types.ts";
+import { redactSecrets, redactString } from "./redact.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 
@@ -73,6 +74,7 @@ export class EngramLogger {
         input.correlation?.workspace_id ?? null,
         input.correlation?.correlation_id ?? null,
       );
+      trimLogEvents(this.db, this.projectId, this.cfg.eventMaxRows);
     } catch {
       /* logging must never affect runtime behavior */
     }
@@ -226,7 +228,7 @@ export function formatEventReport(rows: LogEventRow[], label = "recent events"):
 
 function serializeDetail(detail: Record<string, unknown> | null, max: number): string | null {
   if (!detail) return null;
-  return truncate(JSON.stringify(detail), max);
+  return truncate(JSON.stringify(redactSecrets(detail)), max);
 }
 
 function truncate(s: string, max: number): string {
@@ -235,13 +237,13 @@ function truncate(s: string, max: number): string {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  if (error instanceof Error) return redactString(error.message);
+  return redactString(String(error));
 }
 
 function errorPayload(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) return { name: error.name, message: error.message };
-  return { message: String(error) };
+  if (error instanceof Error) return { name: error.name, message: redactString(error.message) };
+  return { message: redactString(String(error)) };
 }
 
 function levelRank(level: LogLevel): number {

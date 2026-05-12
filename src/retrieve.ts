@@ -94,6 +94,7 @@ export async function searchMemory(opts: {
   skipRerank: boolean;
   queryEmbedding?: number[];
   correlation?: EngramCorrelation | null;
+  onRerankFailure?: (error: unknown, detail: { candidateCount: number; model: string }) => void;
 }): Promise<{ hits: MemoryHit[]; ftsIds: string[]; vecIds: string[]; metrics: SearchMetrics }> {
   const totalStart = performance.now();
   let ftsMs = 0;
@@ -198,7 +199,8 @@ export async function searchMemory(opts: {
       if (!opts.key) throw new Error("rerank: API key required");
       ordered = await rerank(opts.key, cfg.rerank.model, opts.query, topMerge, opts.db);
       rerankMs = performance.now() - rerankStart;
-    } catch {
+    } catch (error) {
+      opts.onRerankFailure?.(error, { candidateCount: topMerge.length, model: cfg.rerank.model });
       ordered = topMerge;
     }
   }

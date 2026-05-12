@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { ulid } from "ulid";
 import type { EngramCorrelation } from "./types.ts";
+import { redactSecrets } from "./redact.ts";
 
 export type MetricStatus = "ok" | "error" | "skip";
 
@@ -54,7 +55,7 @@ export function recordMetric(db: Database, input: MetricInput) {
   const before = input.before;
   const after = input.after;
   const detail = input.detail
-    ? truncate(JSON.stringify(input.detail), input.detailMaxLength ?? 2000)
+    ? truncate(JSON.stringify(redactSecrets(input.detail)), input.detailMaxLength ?? 2000)
     : null;
   db.prepare(
     `INSERT INTO operation_metric (

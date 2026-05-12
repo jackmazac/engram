@@ -110,6 +110,22 @@ export type ContextBundleResponse = {
   terms: string[];
   sections: ContextBundleSection[];
   suggestedNextSteps?: string[];
+  metrics?: {
+    totalMs: number;
+    termsCount: number;
+    rootCandidates: number;
+    artifactCandidates: number;
+    distillationCandidates: number;
+    chunkCandidates: number;
+    correlatedCandidates: number;
+    correlationHits: number;
+    rankedCandidates: number;
+    sections: number;
+    items: number;
+    budgetChars: number;
+    usedChars: number;
+    truncated: boolean;
+  };
 };
 
 export const fleetCorrelationBridgeNotes = {

@@ -2,7 +2,7 @@
  * Plugin lifecycle dashboard.
  *
  * Reads ndjson lines from `~/.local/share/opencode/log/plugin-lifecycle.jsonl`
- * (emitted by `@jackmazac/opencode-host-adapter`) and produces per-plugin
+ * (emitted by the OpenCode plugin host wrapper) and produces per-plugin
  * load and tool execution metrics.
  *
  * Used by:

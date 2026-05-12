@@ -1,15 +1,12 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { ulid } from "ulid";
-import {
-  buildArtifactRef,
-  decodeFleetContext,
-  fleetContextToJson,
-} from "@jackmazac/opencode-fleet-contracts";
+import { buildArtifactRef } from "@jackmazac/opencode-fleet-contracts";
 import type { EngramConfig } from "./config.ts";
 import { insertChunkCorrelation } from "./db.ts";
+import { withArtifactCorrelation } from "./fleet.ts";
 import { contentHash } from "./hash.ts";
 import type { EngramCorrelation } from "./types.ts";
 
@@ -252,21 +249,6 @@ export function formatArtifactIngestSummary(s: ArtifactIngestSummary): string {
   return lines.join("\n");
 }
 
-function withArtifactCorrelation(
-  base: EngramCorrelation | null | undefined,
-  artifactRef: string,
-  lifecycleObjectId: string | null,
-): EngramCorrelation | null {
-  const raw = {
-    ...(base ? fleetContextToJson(base) : {}),
-    artifact_ref: artifactRef,
-    lifecycle_object_id: lifecycleObjectId,
-  };
-  const decoded = decodeFleetContext(raw);
-  if (decoded.ok) return decoded.value;
-  return base ?? null;
-}
-
 function lifecycleObjectIdFor(source: Source, item: Item): string | null {
   if (source.kind === "concord_collision" || source.kind === "concord_guidance") {
     if (item.slug?.startsWith("concord:")) return `concord-event:${item.slug}`;
@@ -445,24 +427,51 @@ function contentType(kind: ArtifactKind, content: string): string {
 }
 
 function walkKind(worktree: string, rel: string, kind: ArtifactKind, exts: string[]): Source[] {
-  const root = path.join(worktree, rel);
+  const root = safeResolveInside(worktree, rel);
   if (!existsSync(root)) return [];
+  const realWorktree = realpathSync(worktree);
+  const realRoot = safeExistingInside(worktree, root);
   const out: Source[] = [];
   const walk = (dir: string) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, ent.name);
       if (ent.isDirectory()) walk(file);
-      else if (exts.includes(path.extname(ent.name)))
-        out.push({ kind, file, rel: path.relative(worktree, file) });
+      else if (exts.includes(path.extname(ent.name))) {
+        const realFile = safeExistingInside(worktree, file);
+        out.push({ kind, file: realFile, rel: normalizeRel(path.relative(realWorktree, realFile)) });
+      }
     }
   };
-  walk(root);
+  walk(realRoot);
   return out;
 }
 
 function fileKind(worktree: string, rel: string, kind: ArtifactKind): Source[] {
-  const file = path.join(worktree, rel);
-  return existsSync(file) ? [{ kind, file, rel }] : [];
+  const file = safeResolveInside(worktree, rel);
+  if (!existsSync(file)) return [];
+  const realRoot = realpathSync(worktree);
+  const realFile = safeExistingInside(worktree, file);
+  return [{ kind, file: realFile, rel: normalizeRel(path.relative(realRoot, realFile)) }];
+}
+
+function safeResolveInside(worktree: string, rel: string): string {
+  if (rel.split(/[\\/]+/).includes("..")) throw new Error(`Artifact path escapes worktree: ${rel}`);
+  const logicalRoot = path.resolve(worktree);
+  const resolved = path.resolve(worktree, rel);
+  if (!inside(logicalRoot, resolved)) throw new Error(`Artifact path escapes worktree: ${rel}`);
+  return resolved;
+}
+
+function safeExistingInside(worktree: string, file: string): string {
+  const realRoot = realpathSync(worktree);
+  const realFile = realpathSync(file);
+  if (!inside(realRoot, realFile)) throw new Error(`Artifact path escapes worktree: ${file}`);
+  return realFile;
+}
+
+function inside(root: string, file: string): boolean {
+  const rel = path.relative(root, file);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 function firstTitle(raw: string): string | null {

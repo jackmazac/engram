@@ -253,10 +253,8 @@ PRAGMA user_version = 1;
   }
 
   if (v < 2) {
-    db.exec(`
-ALTER TABLE export_checkpoint ADD COLUMN exported_part_id TEXT;
-PRAGMA user_version = 2;
-    `);
+    addColumnIfMissing(db, "export_checkpoint", "exported_part_id", "TEXT");
+    db.exec(`PRAGMA user_version = 2;`);
     v = 2;
   }
 
@@ -298,10 +296,9 @@ PRAGMA user_version = 4;
   }
 
   if (v < 5) {
+    addColumnIfMissing(db, "chunk", "embedding_model", "TEXT");
+    addColumnIfMissing(db, "chunk", "embedding_dimensions", "INTEGER");
     db.exec(`
-ALTER TABLE chunk ADD COLUMN embedding_model TEXT;
-ALTER TABLE chunk ADD COLUMN embedding_dimensions INTEGER;
-
 UPDATE chunk SET time_embedded = NULL
 WHERE embedding IS NOT NULL AND (embedding_model IS NULL OR embedding_dimensions IS NULL);
 
@@ -442,12 +439,11 @@ PRAGMA user_version = 10;
   }
 
   if (v < 11) {
+    addColumnIfMissing(db, "chunk", "source_kind", "TEXT");
+    addColumnIfMissing(db, "chunk", "source_ref", "TEXT");
+    addColumnIfMissing(db, "chunk", "authority", "REAL NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "chunk", "superseded_by", "TEXT");
     db.exec(`
-ALTER TABLE chunk ADD COLUMN source_kind TEXT;
-ALTER TABLE chunk ADD COLUMN source_ref TEXT;
-ALTER TABLE chunk ADD COLUMN authority REAL NOT NULL DEFAULT 0;
-ALTER TABLE chunk ADD COLUMN superseded_by TEXT;
-
 CREATE INDEX IF NOT EXISTS idx_chunk_project_source_ref ON chunk(project_id, source_ref) WHERE source_ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chunk_project_authority ON chunk(project_id, authority DESC);
 CREATE INDEX IF NOT EXISTS idx_chunk_project_superseded ON chunk(project_id, superseded_by) WHERE superseded_by IS NOT NULL;

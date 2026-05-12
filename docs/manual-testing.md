@@ -41,7 +41,7 @@ bun run ./src/cli/run.ts telemetry --events --project-id engram-eval-core --work
 bun run ./src/cli/run.ts maintain --project-id engram-eval-core --worktree .
 ```
 
-`maintain` is dry-run by default. Use `--apply` only when the target DB is safe to mutate.
+`telemetry` is read-only. `maintain` is dry-run by default; use `--apply` only when the target DB is safe to mutate.
 
 ## Learning Pipeline
 
@@ -94,12 +94,14 @@ Archive restore writes to the OpenCode hot DB, so first test against a copied ho
 bun run ./src/cli/run.ts archive inspect <rootSessionId> --project-id <projectId> --worktree /path/to/project
 bun run ./src/cli/run.ts archive search <rootSessionId> "query" --project-id <projectId> --worktree /path/to/project
 bun run ./src/cli/run.ts archive restore <rootSessionId> --project-id <projectId> --worktree /path/to/project
+bun run ./src/cli/run.ts archive import-memory <rootSessionId> --project-id <projectId> --worktree /path/to/project
 ```
 
 Only then run:
 
 ```bash
 bun run ./src/cli/run.ts archive restore --apply <rootSessionId> --project-id <projectId> --worktree /path/to/project
+bun run ./src/cli/run.ts archive import-memory --apply <rootSessionId> --project-id <projectId> --worktree /path/to/project
 ```
 
 ## Live Retrieval

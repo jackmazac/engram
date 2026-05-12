@@ -64,6 +64,24 @@ export type ContextBundle = {
   workspaceSignals?: WorkspaceSignals;
   sections: ContextBundleSection[];
   suggestedNextSteps?: string[];
+  metrics?: ContextCompileMetrics;
+};
+
+export type ContextCompileMetrics = {
+  totalMs: number;
+  termsCount: number;
+  rootCandidates: number;
+  artifactCandidates: number;
+  distillationCandidates: number;
+  chunkCandidates: number;
+  correlatedCandidates: number;
+  correlationHits: number;
+  rankedCandidates: number;
+  sections: number;
+  items: number;
+  budgetChars: number;
+  usedChars: number;
+  truncated: boolean;
 };
 
 type Candidate = Omit<ContextBundleItem, "section" | "score" | "reasons"> & {
@@ -92,19 +110,23 @@ export function buildContextBundle(opts: {
   budgetChars?: number;
   proactiveHintsEnabled?: boolean;
 }): ContextBundle {
+  const start = performance.now();
   const mode = opts.mode ?? "plan";
   const profile = opts.profile ?? "agent_read";
   const terms = expandTerms(opts.query, opts.workspaceSignals);
   const limit = Math.max(1, Math.min(opts.limit, 50));
-  const correlationChunkIds = new Set(
-    queryChunksByCorrelation(opts.db, correlationFilters(opts.workspaceSignals)),
-  );
+  const correlationChunkIds = queryCorrelationChunkIds(opts.db, opts.workspaceSignals);
+  const correlated = correlatedChunkCandidates(opts.db, opts.projectId, correlationChunkIds);
+  const roots = rootCandidates(opts.db, opts.projectId, terms, limit);
+  const artifacts = artifactCandidates(opts.db, opts.projectId, terms, limit);
+  const distillations = distillationCandidates(opts.db, opts.projectId, terms, limit);
+  const chunks = chunkCandidates(opts.db, opts.projectId, terms, limit * 2);
   const candidates = [
-    ...correlatedChunkCandidates(opts.db, opts.projectId, correlationChunkIds),
-    ...rootCandidates(opts.db, opts.projectId, terms, limit),
-    ...artifactCandidates(opts.db, opts.projectId, terms, limit),
-    ...distillationCandidates(opts.db, opts.projectId, terms, limit),
-    ...chunkCandidates(opts.db, opts.projectId, terms, limit * 2),
+    ...correlated,
+    ...roots,
+    ...artifacts,
+    ...distillations,
+    ...chunks,
   ];
   const ranked = rankCandidates(
     dedupeCandidates(candidates),
@@ -113,7 +135,9 @@ export function buildContextBundle(opts: {
     correlationChunkIds,
     profile,
   );
-  const sections = buildSections(ranked, mode, limit, opts.budgetChars ?? 6000);
+  const budgetChars = opts.budgetChars ?? 6000;
+  const sectionResult = buildSections(ranked, mode, limit, budgetChars);
+  const sections = sectionResult.sections;
   // Fleet passivity: rule-based steering stays off unless the operator explicitly opts in.
   const suggestedNextSteps =
     opts.proactiveHintsEnabled === true ? suggestedSteps(sections, mode) : [];
@@ -147,6 +171,22 @@ export function buildContextBundle(opts: {
     terms,
     workspaceSignals: opts.workspaceSignals,
     sections,
+    metrics: {
+      totalMs: performance.now() - start,
+      termsCount: terms.length,
+      rootCandidates: roots.length,
+      artifactCandidates: artifacts.length,
+      distillationCandidates: distillations.length,
+      chunkCandidates: chunks.length,
+      correlatedCandidates: correlated.length,
+      correlationHits: correlationChunkIds.size,
+      rankedCandidates: ranked.length,
+      sections: sections.length,
+      items: sections.reduce((sum, section) => sum + section.items.length, 0),
+      budgetChars,
+      usedChars: sectionResult.usedChars,
+      truncated: sectionResult.truncated,
+    },
   };
   if (opts.proactiveHintsEnabled === true) bundle.suggestedNextSteps = suggestedNextSteps;
   return bundle;
@@ -481,7 +521,7 @@ function buildSections(
   mode: ContextMode,
   limit: number,
   budgetChars: number,
-): ContextBundleSection[] {
+): { sections: ContextBundleSection[]; usedChars: number; truncated: boolean } {
   const sectionIds: ContextSectionId[] = [
     "must_know",
     "relevant_past_work",
@@ -491,18 +531,24 @@ function buildSections(
   ];
   const buckets = new Map<ContextSectionId, ContextBundleItem[]>(sectionIds.map((id) => [id, []]));
   let used = 0;
+  let truncated = false;
   for (const item of items) {
-    if (used >= budgetChars) break;
+    if (used >= budgetChars) {
+      truncated = true;
+      break;
+    }
     const bucket = buckets.get(item.section) ?? buckets.get("evidence");
     if (!bucket || bucket.length >= perSectionLimit(item.section, mode, limit)) continue;
     const clipped = { ...item, text: compact(item.text, 700) };
+    if (clipped.text.length < item.text.replace(/\s+/g, " ").trim().length) truncated = true;
     used += clipped.text.length;
     bucket.push(clipped);
   }
-  return sectionIds.flatMap((id) => {
+  const sections = sectionIds.flatMap((id) => {
     const rows = buckets.get(id) ?? [];
     return rows.length ? [{ id, title: sectionTitles[id], items: rows }] : [];
   });
+  return { sections, usedChars: used, truncated };
 }
 
 function perSectionLimit(section: ContextSectionId, mode: ContextMode, limit: number): number {
@@ -654,11 +700,17 @@ function correlationTerms(signals: WorkspaceSignals | undefined): string[] {
   ].flatMap((value) => (value ? tokenize(value) : []));
 }
 
-function correlationFilters(signals: WorkspaceSignals | undefined): ChunkCorrelationFilters {
-  if (!signals) return {};
-  const lifecycle = signals.lifecycleObjectId ?? signals.lifecycleObjectIds?.[0] ?? null;
-  const artifact = signals.artifactRef ?? signals.artifactRefs?.[0] ?? null;
-  return {
+function queryCorrelationChunkIds(db: Database, signals: WorkspaceSignals | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const filters of correlationFilterSet(signals)) {
+    for (const id of queryChunksByCorrelation(db, filters)) out.add(id);
+  }
+  return out;
+}
+
+function correlationFilterSet(signals: WorkspaceSignals | undefined): ChunkCorrelationFilters[] {
+  if (!signals) return [];
+  const base = {
     workspace_id: signals.workspaceId ?? null,
     plan_id: signals.planId ?? null,
     wave_id: signals.waveId ?? null,
@@ -666,9 +718,21 @@ function correlationFilters(signals: WorkspaceSignals | undefined): ChunkCorrela
     correlation_id: signals.correlationId ?? null,
     tool_call_id: signals.toolCallId ?? null,
     spine_seq: signals.spineSeq ?? null,
-    artifact_ref: artifact,
-    lifecycle_object_id: lifecycle,
   };
+  const artifacts = unique([signals.artifactRef, ...(signals.artifactRefs ?? [])]);
+  const lifecycles = unique([signals.lifecycleObjectId, ...(signals.lifecycleObjectIds ?? [])]);
+  if (artifacts.length === 0 && lifecycles.length === 0) return [{ ...base }];
+  const artifactValues = artifacts.length ? artifacts : [null];
+  const lifecycleValues = lifecycles.length ? lifecycles : [null];
+  const out: ChunkCorrelationFilters[] = [];
+  for (const artifact_ref of artifactValues)
+    for (const lifecycle_object_id of lifecycleValues)
+      out.push({ ...base, artifact_ref, lifecycle_object_id });
+  return out;
+}
+
+function unique(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
 function isChunkRow(value: unknown): value is ChunkRow {

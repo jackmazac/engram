@@ -38,6 +38,9 @@ describe("dashboard and curation", () => {
     expect(formatCurationSummary(dry)).toContain("dry-run")
     const stillThere = db.query(`SELECT count(*) AS c FROM chunk WHERE project_id = ?`).get("proj1") as { c: number }
     expect(stillThere.c).toBe(3)
+    expect(db.query(`SELECT count(*) AS c FROM curation_run WHERE project_id = ?`).get("proj1")).toEqual({
+      c: 0,
+    })
 
     const applied = runCuration({ db, projectId: "proj1", apply: true, max: 20 })
     expect(applied.applied).toBe(true)

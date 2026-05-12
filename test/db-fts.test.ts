@@ -38,6 +38,29 @@ describe("migrations and FTS", () => {
     unlinkSync(p);
   });
 
+  test("partial migrations tolerate columns that already exist", () => {
+    const dir = path.join("/tmp", `engram-partial-migration-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, "memory.db");
+    const db = openMemoryDb(p);
+    db.exec(`PRAGMA user_version = 4;`);
+    db.close();
+
+    const migrated = openMemoryDb(p);
+    const v = Number(
+      (migrated.query("PRAGMA user_version;").get() as { user_version: number }).user_version,
+    );
+    expect(v).toBe(14);
+    expect(migrated.query(`PRAGMA table_info(chunk)`).all()).toContainEqual(
+      expect.objectContaining({ name: "embedding_model" }),
+    );
+    expect(migrated.query(`PRAGMA table_info(chunk)`).all()).toContainEqual(
+      expect.objectContaining({ name: "source_kind" }),
+    );
+    migrated.close();
+    unlinkSync(p);
+  });
+
   test("export checkpoints are scoped by project and root session", () => {
     const dir = path.join("/tmp", `engram-ck-${Date.now()}`);
     mkdirSync(dir, { recursive: true });

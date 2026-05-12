@@ -69,7 +69,7 @@ Conductor and other fleet plugins call `conflict_context` and `lifecycle_ingest`
 
 `conflict_context` accepts any combination of `plan_slug`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `artifact_refs`, `lifecycle_object_ids`, and `concord_event_ids`. It resolves the corresponding `chunk_correlation` rows, retrieves the associated chunks via the standard hybrid pipeline, and returns a bounded evidence bundle in the same shape as `memory_context`.
 
-`lifecycle_ingest` accepts the same glob/path arguments as `engram ingest-artifacts`. By default it is a dry-run (`dry_run: true`); set `dry_run: false` to apply. It returns `{ applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids }`.
+`lifecycle_ingest` accepts the same glob/path arguments as `engram ingest-artifacts`. By default it is a dry-run (`apply` absent or `false`); set `apply: true` to write sidecar rows. It returns `{ applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids }`.
 
 Neither tool calls OpenAI unless the embedding/rerank path is explicitly configured with an API key — the correlation filter and artifact ingest paths are fully local.
 
@@ -96,7 +96,7 @@ bun run ./src/cli/run.ts archive verify-all --worktree /path/to/project
 bun run ./src/cli/run.ts archive inspect <rootSessionId> --worktree /path/to/project
 bun run ./src/cli/run.ts archive search <rootSessionId> "query" --worktree /path/to/project
 bun run ./src/cli/run.ts archive restore [--apply] <rootSessionId> --worktree /path/to/project
-bun run ./src/cli/run.ts archive import-memory <rootSessionId> --worktree /path/to/project
+bun run ./src/cli/run.ts archive import-memory [--apply] <rootSessionId> --worktree /path/to/project
 bun run ./src/cli/run.ts archive delete [--vacuum] <rootSessionId> ... --worktree /path/to/project
 bun run ./src/cli/run.ts ingest-artifacts [--apply] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts index-hot [--apply] --project-id <uuid> --worktree /path/to/project
@@ -109,7 +109,7 @@ bun run ./src/cli/run.ts eval run --fixture eval/fixtures/core.json --worktree /
      # context bundles: bun run ./src/cli/run.ts eval context --sidecar --fixture /path/to/context-fixture.json --worktree /path/to/project
 bun run ./src/cli/run.ts dashboard [--json] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts maintain [--apply] [--health-report] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts curate [--apply] --project-id <uuid> --worktree /path/to/project
+bun run ./src/cli/run.ts curate [--apply|--record] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts telemetry [--events] [--json] --project-id <uuid> --worktree /path/to/project
 bun run ./src/cli/run.ts sprint [--rows 3000] [--local-only] [--rerank] --worktree /path/to/project
 bun run ./src/cli/run.ts doctor [--json] --worktree /path/to/project
@@ -118,13 +118,13 @@ bun run ./src/cli/run.ts check [--json] --worktree /path/to/project
 bun run ./src/cli/run.ts repair-sidecar [--apply] --worktree /path/to/project
 ```
 
-`archive delete` verifies every requested archive before touching the hot DB. `archive restore` is dry-run by default; pass `--apply` only after testing on a copy of `opencode.db`.
+`archive delete` verifies every requested archive before touching the hot DB. `archive restore` and `archive import-memory` are dry-run by default; pass `--apply` only after testing restore against a copy of `opencode.db` or reviewing the sidecar import summary.
 
-`ingest-artifacts`, `index-hot`, `backfill-hot`, `distill`, `relations`, and `context` are the long-term learning pipeline. They discover high-signal OpenCode artifacts, index root session trees, selectively backfill useful hot DB evidence, create deterministic root summaries, connect superseded memories, and produce bounded preflight context bundles. Mutating commands are dry-run by default and require `--apply`.
+`ingest-artifacts`, `index-hot`, `backfill-hot`, `distill`, `relations`, and `context` are the long-term learning pipeline. They discover high-signal OpenCode artifacts, index root session trees, selectively backfill useful hot DB evidence, create deterministic root summaries, connect superseded memories, and produce bounded preflight context bundles. Mutating learning commands are dry-run by default and require `--apply`; `context` is read-only.
 
 Automatic legacy hot DB backfill is **opt-in** (`backfill.auto: false`) so the live plugin runtime never scans large OpenCode databases by default. Prefer `index-hot` and `backfill-hot` for explicit high-signal learning runs; if scheduled legacy backfill is enabled locally, keep `backfill.repeat: false` unless you have measured runtime impact.
 
-`eval` runs checked-in retrieval fixtures and records drift metadata. `dashboard` is CLI/JSON-only and summarizes memory health, archives, evals, telemetry, log events, and learning coverage. `maintain` performs dry-run or explicit maintenance actions. `curate` proposes duplicate/low-value chunk cleanup and only mutates with `--apply`. `telemetry` summarizes sidecar operation metrics and bounded log events recorded by live plugin usage. `sprint` runs a manual latency/memory sprint: a deterministic local retrieval workload plus, when an OpenAI key resolves, a small live embedding retrieval accuracy fixture.
+`eval` runs checked-in retrieval fixtures and records drift metadata. `dashboard` is CLI/JSON-only and summarizes memory health, archives, evals, telemetry, log events, and learning coverage. `maintain` performs dry-run or explicit maintenance actions. `curate` proposes duplicate/low-value chunk cleanup without writes by default; use `--record` to persist a proposal run without applying, or `--apply` to delete proposed chunks. `telemetry` is read-only and summarizes sidecar operation metrics and bounded log events recorded by live plugin usage. `sprint` runs a manual latency/memory sprint: a deterministic local retrieval workload plus, when an OpenAI key resolves, a small live embedding retrieval accuracy fixture.
 
 The [`package.json`](package.json) `"bin"` field exposes the same entry as the `engram` command if you `bun link` or install the package locally.
 
@@ -156,7 +156,7 @@ Tests include an **optional live** suite (`test/openai-live-nano.test.ts`) when 
 - Checked-in retrieval fixtures live in [`eval/fixtures`](eval/fixtures).
 - `engram eval run` reports recall@K, hit@K, MRR, p50, and p95 latency. By default fixtures are synthetic and seed their own chunks; `--sidecar` evaluates against an existing project sidecar and fixture expected IDs must already exist in that `memory.db`.
 - `engram eval context` reports section hit, recall@budget, stale/noise rates, and latency for compiled context bundles.
-- `engram telemetry --events` reports bounded lifecycle/failure events; `maintain --prune-telemetry --apply` prunes both metrics and events.
+- `engram telemetry --events` reports bounded lifecycle/failure events without mutating the sidecar; `maintain --prune-telemetry --apply` prunes both metrics and events.
 - `engram ingest-artifacts` should run before broad hot DB backfills; plans, audits, journals, progress files, and distillations are higher signal than raw tool output.
 - `engram context` is the CLI/TUI-friendly Orchestrator bridge: it returns a bounded preflight bundle without requiring the custom Orchestrator plugin.
 - The bridge contract is exported from `opencode-engram/bridge` for optional integrations.
@@ -175,7 +175,7 @@ This repo is intended to load via a direct `file://` plugin entry during local d
 
 ## Retention
 
-Defaults remain unchanged: operation metrics retain **14 days**, log events retain **14 days**, and log events are capped at **5000 rows**. Tune these in `.opencode/engram.jsonc` under `telemetry.retainDays`, `telemetry.eventRetainDays`, and `telemetry.eventMaxRows`. Apply pruning explicitly with:
+Defaults remain unchanged: operation metrics retain **14 days**, log events retain **14 days**, and log events are capped at **5000 rows**. Runtime logging enforces `eventMaxRows` on each persisted log event so events cannot grow without bound; age-based metric/event pruning remains explicit. Tune these in `.opencode/engram.jsonc` under `telemetry.retainDays`, `telemetry.eventRetainDays`, and `telemetry.eventMaxRows`. Apply age pruning explicitly with:
 
 ```bash
 bun run ./src/cli/run.ts maintain --prune-telemetry --apply --project-id <uuid> --worktree /path/to/project

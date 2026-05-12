@@ -75,7 +75,13 @@ export function listRootSessionIds(hotPath: string, projectId: string): string[]
   }
 }
 
-export function staleRootIds(hotPath: string, projectId: string, staleDays: number, now: number): string[] {
+export function staleRootIds(
+  hotPath: string,
+  projectId: string,
+  staleDays: number,
+  now: number,
+  limit = 100,
+): string[] {
   const cutoff = now - staleDays * 86400000
   const db = new Database(hotPath, { readonly: true })
   applyConnPragmas(db)
@@ -87,9 +93,9 @@ export function staleRootIds(hotPath: string, projectId: string, staleDays: numb
            UNION ALL
            SELECT t.root_id, s.id, s.time_updated FROM session s INNER JOIN t ON s.parent_id = t.id
          )
-         SELECT root_id AS id FROM t GROUP BY root_id HAVING max(time_updated) < ?`,
+	         SELECT root_id AS id FROM t GROUP BY root_id HAVING max(time_updated) < ? LIMIT ?`,
       )
-      .all(projectId, cutoff) as { id: string }[]
+      .all(projectId, cutoff, limit) as { id: string }[]
     return rows.map((r) => r.id)
   } finally {
     db.close()
@@ -185,7 +191,7 @@ export async function exportRootSession(opts: ExportOpts): Promise<{ skipped: bo
       }
     | undefined
 
-  const existingAbs = existing ? path.join(archiveRoot, existing.archive_path) : ""
+  const existingAbs = existing ? safeArchiveAbs(archiveRoot, existing.archive_path) : ""
   let sessionCount = 0
   let msgCount = 0
   let partCount = 0
@@ -482,7 +488,7 @@ export async function verifyArchiveFile(opts: {
     .query(`SELECT content_hash, archive_path FROM archive WHERE root_session_id = ? AND project_id = ?`)
     .get(opts.rootSessionId, opts.projectId) as { content_hash: string; archive_path: string } | undefined
   if (!row) return { ok: false, detail: "No archive row" }
-  const abs = path.join(opts.archiveRoot, row.archive_path)
+  const abs = safeArchiveAbs(opts.archiveRoot, row.archive_path)
   if (!existsSync(abs)) return { ok: false, detail: `Missing file ${abs}` }
   const { hash: h } = await sha256File(abs)
   if (h !== row.content_hash)
@@ -498,11 +504,21 @@ export async function* readArchiveRecords(file: string): AsyncGenerator<ArchiveR
     input: createReadStream(file).pipe(createGunzip()),
     crlfDelay: Infinity,
   })
+  let lineNumber = 0
   for await (const line of rl) {
+    lineNumber++
     const trimmed = line.trim()
     if (!trimmed) continue
-    const record = JSON.parse(trimmed) as ArchiveRecord
-    if (record.kind === "session" || record.kind === "message" || record.kind === "part") yield record
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed) as unknown
+    } catch (error) {
+      throw new Error(
+        `Malformed archive JSONL at ${file}:${lineNumber}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const record = parseArchiveRecord(parsed, file, lineNumber)
+    yield record
   }
 }
 
@@ -511,7 +527,58 @@ function archiveAbs(memoryDb: Database, archiveRoot: string, projectId: string, 
     .query(`SELECT archive_path FROM archive WHERE root_session_id = ? AND project_id = ?`)
     .get(rootSessionId, projectId) as { archive_path: string } | undefined
   if (!row) throw new Error(`No archive row for ${rootSessionId}`)
-  return path.join(archiveRoot, row.archive_path)
+  return safeArchiveAbs(archiveRoot, row.archive_path)
+}
+
+function safeArchiveAbs(archiveRoot: string, archivePath: string): string {
+  if (path.isAbsolute(archivePath) || archivePath.split(/[\\/]+/).includes("..")) {
+    throw new Error(`Archive path escapes archive root: ${archivePath}`)
+  }
+  const root = path.resolve(archiveRoot)
+  const abs = path.resolve(root, archivePath)
+  const rel = path.relative(root, abs)
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Archive path escapes archive root: ${archivePath}`)
+  }
+  return abs
+}
+
+function parseArchiveRecord(value: unknown, file: string, line: number): ArchiveRecord {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    throw new Error(`Invalid archive record at ${file}:${line}: missing kind`)
+  }
+  if (value.kind === "session") {
+    if (
+      typeof value.id === "string" &&
+      typeof value.project_id === "string" &&
+      (value.parent_id === null || typeof value.parent_id === "string") &&
+      typeof value.time_created === "number" &&
+      typeof value.time_updated === "number"
+    )
+      return value as ArchiveRecord
+  } else if (value.kind === "message") {
+    if (
+      typeof value.id === "string" &&
+      typeof value.session_id === "string" &&
+      typeof value.time_created === "number" &&
+      "data" in value
+    )
+      return value as ArchiveRecord
+  } else if (value.kind === "part") {
+    if (
+      typeof value.id === "string" &&
+      typeof value.message_id === "string" &&
+      typeof value.session_id === "string" &&
+      typeof value.time_created === "number" &&
+      "data" in value
+    )
+      return value as ArchiveRecord
+  }
+  throw new Error(`Invalid archive record at ${file}:${line}: bad ${value.kind} shape`)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 export async function inspectArchive(opts: {
@@ -540,44 +607,56 @@ export async function restoreArchiveToHot(opts: {
   dryRun: boolean
 }): Promise<{ sessions: number; messages: number; parts: number; applied: boolean }> {
   const file = archiveAbs(opts.memoryDb, opts.archiveRoot, opts.projectId, opts.rootSessionId)
-  const records: ArchiveRecord[] = []
-  for await (const record of readArchiveRecords(file)) records.push(record)
   const counts = {
-    sessions: records.filter((r) => r.kind === "session").length,
-    messages: records.filter((r) => r.kind === "message").length,
-    parts: records.filter((r) => r.kind === "part").length,
+    sessions: 0,
+    messages: 0,
+    parts: 0,
     applied: false,
   }
-  if (opts.dryRun) return counts
-
-  const hot = new Database(opts.hotPath)
-  applyConnPragmas(hot)
+  const hot = opts.dryRun ? null : new Database(opts.hotPath)
+  if (hot) applyConnPragmas(hot)
+  const seenSessions = new Set<string>()
+  const seenMessages = new Set<string>()
+  let sawRoot = false
   try {
-    const insSession = hot.prepare(
+    const insSession = hot?.prepare(
       `INSERT OR IGNORE INTO session (id, project_id, parent_id, time_created, time_updated) VALUES (?,?,?,?,?)`,
     )
-    const insMessage = hot.prepare(
+    const insMessage = hot?.prepare(
       `INSERT OR IGNORE INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)`,
     )
-    const insPart = hot.prepare(
+    const insPart = hot?.prepare(
       `INSERT OR IGNORE INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)`,
     )
-    const tx = hot.transaction(() => {
-      for (const record of records) {
-        if (record.kind === "session") {
-          insSession.run(record.id, record.project_id, record.parent_id, record.time_created, record.time_updated)
-        } else if (record.kind === "message") {
-          insMessage.run(record.id, record.session_id, record.time_created, JSON.stringify(record.data))
-        } else {
-          insPart.run(record.id, record.message_id, record.session_id, record.time_created, JSON.stringify(record.data))
-        }
+    const tx = hot?.transaction((record: ArchiveRecord) => {
+      if (record.kind === "session") {
+        insSession?.run(record.id, record.project_id, record.parent_id, record.time_created, record.time_updated)
+      } else if (record.kind === "message") {
+        insMessage?.run(record.id, record.session_id, record.time_created, JSON.stringify(record.data))
+      } else {
+        insPart?.run(record.id, record.message_id, record.session_id, record.time_created, JSON.stringify(record.data))
       }
     })
-    tx()
-    counts.applied = true
+
+    for await (const record of readArchiveRecords(file)) {
+      validateArchiveScope(record, opts.projectId, opts.rootSessionId, seenSessions, seenMessages)
+      if (record.kind === "session") {
+        counts.sessions++
+        seenSessions.add(record.id)
+        if (record.id === opts.rootSessionId) sawRoot = true
+      } else if (record.kind === "message") {
+        counts.messages++
+        seenMessages.add(record.id)
+      } else {
+        counts.parts++
+      }
+      if (!opts.dryRun) tx?.(record)
+    }
+    if (!sawRoot) throw new Error(`Archive ${opts.rootSessionId} does not contain requested root session`)
+    counts.applied = !opts.dryRun
     return counts
   } finally {
-    hot.close()
+    hot?.close()
   }
 }
 
@@ -602,49 +681,90 @@ export async function searchArchive(opts: {
   return out
 }
 
+function validateArchiveScope(
+  record: ArchiveRecord,
+  projectId: string,
+  rootSessionId: string,
+  seenSessions: Set<string>,
+  seenMessages: Set<string>,
+): void {
+  if (record.kind === "session") {
+    if (record.project_id !== projectId) {
+      throw new Error(`Archive record project mismatch: ${record.project_id} != ${projectId}`)
+    }
+    if (record.parent_id !== null && !seenSessions.has(record.parent_id)) {
+      throw new Error(`Archive session ${record.id} references out-of-scope parent ${record.parent_id}`)
+    }
+    if (seenSessions.size === 0 && record.id !== rootSessionId) {
+      throw new Error(`Archive first session ${record.id} is not requested root ${rootSessionId}`)
+    }
+    return
+  }
+  if (!seenSessions.has(record.session_id)) {
+    throw new Error(`Archive ${record.kind} ${record.id} references out-of-scope session ${record.session_id}`)
+  }
+  if (record.kind === "part" && !seenMessages.has(record.message_id)) {
+    throw new Error(`Archive part ${record.id} references out-of-scope message ${record.message_id}`)
+  }
+}
+
 export async function importArchiveToMemory(opts: {
   memoryDb: Database
   archiveRoot: string
   projectId: string
   rootSessionId: string
   cfg: EngramConfig
-}): Promise<{ inserted: number; scannedParts: number }> {
+  dryRun?: boolean
+}): Promise<{ inserted: number; scannedParts: number; applied: boolean }> {
   const file = archiveAbs(opts.memoryDb, opts.archiveRoot, opts.projectId, opts.rootSessionId)
-  const messages = new Map<string, { role?: string; agent?: string; modelID?: string }>()
-  const parts: Extract<ArchiveRecord, { kind: "part" }>[] = []
-  for await (const record of readArchiveRecords(file)) {
-    if (record.kind === "message" && record.data && typeof record.data === "object") {
-      messages.set(record.id, record.data as { role?: string; agent?: string; modelID?: string })
-    }
-    if (record.kind === "part") parts.push(record)
-  }
-
   const exists = opts.memoryDb.prepare(
     `SELECT 1 FROM chunk WHERE project_id = ? AND session_id = ? AND message_id = ? AND coalesce(part_id, '') = ? AND content_hash = ? LIMIT 1`,
   )
-  const ins = opts.memoryDb.prepare(
+  const ins = opts.dryRun
+    ? null
+    : opts.memoryDb.prepare(
     `INSERT INTO chunk (
       id, session_id, message_id, part_id, project_id, role, agent, model, content_type, content,
       file_paths, tool_name, tool_status, output_head, output_tail, output_length, error_class,
       time_created, content_hash, root_session_id, session_depth, plan_slug
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  )
+      )
+  const messages = new Map<string, { role?: string; agent?: string; modelID?: string }>()
+  const seenSessions = new Set<string>()
+  const seenMessages = new Set<string>()
+  let sawRoot = false
   let inserted = 0
-  const tx = opts.memoryDb.transaction(() => {
-    for (const part of parts) {
-      const msg = messages.get(part.message_id)
-      if (msg?.role !== "assistant") continue
-      if (!part.data || typeof part.data !== "object") continue
-      const data = part.data as { type?: string; text?: string }
-      if (data.type !== "text" || !data.text?.trim()) continue
-      const content = data.text.slice(0, opts.cfg.sidecar.maxChunkLength)
-      const hash = contentHash(content)
-      if (exists.get(opts.projectId, part.session_id, part.message_id, part.id, hash)) continue
-      ins.run(
+  let scannedParts = 0
+
+  for await (const record of readArchiveRecords(file)) {
+    validateArchiveScope(record, opts.projectId, opts.rootSessionId, seenSessions, seenMessages)
+    if (record.kind === "session") {
+      seenSessions.add(record.id)
+      if (record.id === opts.rootSessionId) sawRoot = true
+      continue
+    }
+    if (record.kind === "message") {
+      seenMessages.add(record.id)
+      if (record.data && typeof record.data === "object")
+        messages.set(record.id, record.data as { role?: string; agent?: string; modelID?: string })
+      continue
+    }
+
+    scannedParts++
+    const msg = messages.get(record.message_id)
+    if (msg?.role !== "assistant") continue
+    if (!record.data || typeof record.data !== "object") continue
+    const data = record.data as { type?: string; text?: string }
+    if (data.type !== "text" || !data.text?.trim()) continue
+    const content = data.text.slice(0, opts.cfg.sidecar.maxChunkLength)
+    const hash = contentHash(content)
+    if (exists.get(opts.projectId, record.session_id, record.message_id, record.id, hash)) continue
+    if (!opts.dryRun) {
+      ins?.run(
         ulid(),
-        part.session_id,
-        part.message_id,
-        part.id,
+        record.session_id,
+        record.message_id,
+        record.id,
         opts.projectId,
         "assistant",
         msg.agent ?? null,
@@ -658,17 +778,17 @@ export async function importArchiveToMemory(opts: {
         null,
         null,
         null,
-        part.time_created,
+        record.time_created,
         hash,
         opts.rootSessionId,
         0,
         null,
       )
-      inserted++
     }
-  })
-  tx()
-  return { inserted, scannedParts: parts.length }
+    inserted++
+  }
+  if (!sawRoot) throw new Error(`Archive ${opts.rootSessionId} does not contain requested root session`)
+  return { inserted, scannedParts, applied: opts.dryRun !== true }
 }
 
 export type DeleteOpts = {

@@ -1,7 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin/tool";
 import { wrapPlugin } from "@jackmazac/opencode-host-adapter";
-import { correlationFromUnknown, getRuntime } from "./runtime.ts";
+import { getRuntime } from "./runtime.ts";
+import { correlationFromUnknown } from "./fleet.ts";
 
 const z = tool.schema;
 
@@ -104,13 +105,13 @@ export const EngramPlugin: Plugin = async (input) => {
             .optional()
             .describe("Approximate max characters in returned bundle"),
         },
-        async execute(args) {
+        async execute(args, ctx) {
           return rt.contextTool({
             query: args.query,
             limit: args.limit,
             mode: args.mode,
             budgetChars: args.budget_chars,
-            correlation: correlationFromUnknown(args),
+            correlation: correlationFromUnknown(args, ctx),
           });
         },
       }),
@@ -131,13 +132,17 @@ export const EngramPlugin: Plugin = async (input) => {
           tool_call_id: z.string().optional(),
           spine_seq: z.number().optional(),
           artifact_ref: z.string().optional(),
+          artifact_refs: z.array(z.string()).optional(),
           lifecycle_object_id: z.string().optional(),
+          lifecycle_object_ids: z.array(z.string()).optional(),
           concord_event_id: z.string().optional(),
+          concord_event_ids: z.array(z.string()).optional(),
         },
         async execute(args, ctx) {
           const result = rt.runConflictContext({
             ...fleetArgs(correlationFromUnknown(ctx)),
             ...args,
+            correlation: correlationFromUnknown(args, ctx),
           });
           return { output: JSON.stringify(result, null, 2), metadata: result };
         },

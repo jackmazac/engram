@@ -40,8 +40,6 @@ import { formatHotBackfillSummary, runBackfillHotJob, type BackfillStrategy } fr
 import {
   formatEventReport,
   recentLogEvents,
-  pruneLogEvents,
-  trimLogEvents,
   type LogLevel,
 } from "../logger.ts";
 import { runMaintenance } from "../maintenance.ts";
@@ -49,7 +47,7 @@ import { runManualSprint } from "../manual-sprint.ts";
 import { defaultHotDbPath } from "../paths.ts";
 import { buildMemoryRelations, formatRelationSummary } from "../relations.ts";
 import { formatRootIndexSummary, indexHotRoots } from "../root-index.ts";
-import { formatTelemetryReport, pruneMetrics, recentMetrics } from "../telemetry.ts";
+import { formatTelemetryReport, recentMetrics } from "../telemetry.ts";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..");
 
@@ -190,59 +188,73 @@ async function confirm(question: string): Promise<boolean> {
   return a === "y" || a === "yes";
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  if (
-    ![
-      "archive",
-      "backfill-hot",
-      "context",
-      "curate",
-      "dashboard",
-      "doctor",
-      "distill",
-      "eval",
-      "check",
-      "index-hot",
-      "ingest-artifacts",
-      "maintain",
-      "repair-sidecar",
-      "relations",
-      "status",
-      "telemetry",
-      "sprint",
-    ].includes(argv[0] ?? "")
-  ) {
-    console.error(`Usage:
-  engram archive list [--worktree DIR]
-  engram archive export [--force] <rootSessionId> [--worktree DIR]
-  engram archive verify <rootSessionId> [--worktree DIR]
-  engram archive verify-all [--worktree DIR]
-  engram archive inspect <rootSessionId> [--worktree DIR]
-  engram archive restore [--apply] <rootSessionId> [--worktree DIR]
-  engram archive search <rootSessionId> <query> [--limit N] [--worktree DIR]
-  engram archive import-memory <rootSessionId> [--worktree DIR]
+const knownCommands = [
+  "archive",
+  "backfill-hot",
+  "context",
+  "curate",
+  "dashboard",
+  "doctor",
+  "distill",
+  "eval",
+  "check",
+  "index-hot",
+  "ingest-artifacts",
+  "maintain",
+  "repair-sidecar",
+  "relations",
+  "status",
+  "telemetry",
+  "sprint",
+];
+
+function usage(): string {
+  return `Usage:
+  engram archive list [--json] [--limit N] [--worktree DIR]
+  engram archive export [--json] [--force] <rootSessionId> [--worktree DIR]
+  engram archive verify [--json] <rootSessionId> [--worktree DIR]
+  engram archive verify-all [--json] [--worktree DIR]
+  engram archive inspect [--json] <rootSessionId> [--worktree DIR]
+  engram archive restore [--json] [--apply] <rootSessionId> [--worktree DIR]
+  engram archive search [--json] <rootSessionId> <query> [--limit N] [--worktree DIR]
+  engram archive import-memory [--json] [--apply] <rootSessionId> [--worktree DIR]
   engram archive delete [--vacuum] <rootSessionId> [<rootSessionId>...] [--worktree DIR]
-  engram archive export-stale [--all] [--worktree DIR]   # export stale roots (non-destructive)
+  engram archive export-stale [--json] [--all] [--limit N] [--worktree DIR]
   engram doctor [--json] [--worktree DIR]
   engram status [--json] [--worktree DIR]
   engram check [--json] [--worktree DIR]
-  engram ingest-artifacts [--apply] [--kind journal,plan] [--max N] [--project-id ID] [--worktree DIR]
-  engram index-hot [--apply] [--max N] [--project-id ID] [--worktree DIR]
-  engram backfill-hot [--apply] [--strategy priority|artifact-linked|recent|errors|patches] [--max-roots N] [--max-parts N] [--project-id ID] [--worktree DIR]
-  engram distill [--apply] [--top N] [--project-id ID] [--worktree DIR]
-  engram relations [--apply] [--max N] [--project-id ID] [--worktree DIR]
+  engram ingest-artifacts [--json] [--apply] [--kind journal,plan] [--max N] [--project-id ID] [--worktree DIR]
+  engram index-hot [--json] [--apply] [--max N] [--project-id ID] [--worktree DIR]
+  engram backfill-hot [--json] [--apply] [--strategy priority|artifact-linked|recent|errors|patches] [--max-roots N] [--max-parts N] [--project-id ID] [--worktree DIR]
+  engram distill [--json] [--apply] [--top N] [--project-id ID] [--worktree DIR]
+  engram relations [--json] [--apply] [--max N] [--project-id ID] [--worktree DIR]
   engram context <query> [--mode plan|implement|review|debug|audit|handoff] [--json] [--from-git] [--limit N] [--project-id ID] [--worktree DIR]
   engram eval run --fixture FILE [--out DIR] [--live] [--rerank] [--sidecar] [--worktree DIR]
   engram eval query --fixture FILE --query-id ID [--live] [--rerank] [--sidecar] [--worktree DIR]
   engram eval context --fixture FILE [--out DIR] [--query-id ID] [--sidecar] [--worktree DIR]
-  engram curate [--apply] [--max N] [--project-id ID] [--worktree DIR]
+  engram curate [--json] [--apply|--record] [--max N] [--project-id ID] [--worktree DIR]
   engram dashboard [--json] [--project-id ID] [--worktree DIR]
   engram dashboard --plugins [--json]
   engram maintain [--apply] [--prune-telemetry] [--verify-archives] [--export-stale] [--compact-db] [--health-report] [--project-id ID] [--worktree DIR]
   engram repair-sidecar [--apply] [--worktree DIR]
   engram telemetry [--events] [--json] [--level debug|info|warn|error|fatal] [--limit N] [--project-id ID] [--worktree DIR]
-  engram sprint [--rows N] [--local-only] [--rerank] [--worktree DIR]`);
+  engram sprint [--rows N] [--local-only] [--rerank] [--worktree DIR]
+
+Examples:
+  engram context "workspace memory contract" --mode implement --json --project-id <id>
+  engram ingest-artifacts --project-id <id> --worktree /repo
+  engram archive import-memory --apply <rootSessionId> --project-id <id> --worktree /repo
+  engram maintain --prune-telemetry --apply --project-id <id>`;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(usage());
+    process.exit(0);
+  }
+  if (!knownCommands.includes(argv[0] ?? "")) {
+    console.error(usage());
     process.exit(1);
   }
 
@@ -311,7 +323,7 @@ async function main() {
       kinds,
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
     });
-    console.log(formatArtifactIngestSummary(summary));
+    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatArtifactIngestSummary(summary));
     memoryDb.close();
     return;
   }
@@ -329,7 +341,7 @@ async function main() {
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
       dryRun: !argv.includes("--apply"),
     });
-    console.log(formatRootIndexSummary(summary));
+    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRootIndexSummary(summary));
     memoryDb.close();
     return;
   }
@@ -352,7 +364,11 @@ async function main() {
       maxParts: numberArg(argv, "--max-parts", 500),
       leaseOwner: "engram-cli",
     });
-    console.log(formatHotBackfillSummary(result.summary));
+    console.log(
+      argv.includes("--json")
+        ? JSON.stringify({ summary: result.summary, job: result.job }, null, 2)
+        : formatHotBackfillSummary(result.summary),
+    );
     memoryDb.close();
     return;
   }
@@ -363,17 +379,14 @@ async function main() {
       console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
       process.exit(1);
     }
-    console.log(
-      formatDistillSummary(
-        distillRoots({
-          db: memoryDb,
-          projectId: pid,
-          cfg,
-          top: numberArg(argv, "--top", 20),
-          dryRun: !argv.includes("--apply"),
-        }),
-      ),
-    );
+    const summary = distillRoots({
+      db: memoryDb,
+      projectId: pid,
+      cfg,
+      top: numberArg(argv, "--top", 20),
+      dryRun: !argv.includes("--apply"),
+    });
+    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatDistillSummary(summary));
     memoryDb.close();
     return;
   }
@@ -384,16 +397,13 @@ async function main() {
       console.error("Pass --project-id <uuid> or set ENGRAM_PROJECT_ID.");
       process.exit(1);
     }
-    console.log(
-      formatRelationSummary(
-        buildMemoryRelations({
-          db: memoryDb,
-          projectId: pid,
-          dryRun: !argv.includes("--apply"),
-          max: numberArg(argv, "--max", 100),
-        }),
-      ),
-    );
+    const summary = buildMemoryRelations({
+      db: memoryDb,
+      projectId: pid,
+      dryRun: !argv.includes("--apply"),
+      max: numberArg(argv, "--max", 100),
+    });
+    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRelationSummary(summary));
     memoryDb.close();
     return;
   }
@@ -446,9 +456,6 @@ async function main() {
     }
     const limit = numberArg(argv, "--limit", 200);
     const minLevel = levelArg(argv);
-    pruneMetrics(memoryDb, pid, cfg.telemetry.retainDays);
-    pruneLogEvents(memoryDb, pid, cfg.telemetry.eventRetainDays);
-    trimLogEvents(memoryDb, pid, cfg.telemetry.eventMaxRows);
     const metrics = recentMetrics(memoryDb, pid, limit);
     const events = recentLogEvents(memoryDb, pid, { limit, minLevel });
     if (argv.includes("--json")) {
@@ -569,9 +576,10 @@ async function main() {
       db: memoryDb,
       projectId: pid,
       apply: argv.includes("--apply"),
+      record: argv.includes("--record"),
       max: numberArg(argv, "--max", 100),
     });
-    console.log(formatCurationSummary(summary));
+    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatCurationSummary(summary));
     memoryDb.close();
     return;
   }
@@ -596,6 +604,12 @@ async function main() {
     }
     const rows = listArchiveRows(memoryDb, pid);
     const archRoot = expandArchivePath(home, cfg.archive);
+    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now(), numberArg(argv, "--limit", 100));
+    if (argv.includes("--json")) {
+      console.log(JSON.stringify({ archiveDir: archRoot, hotDb: hot, rows, stale }, null, 2));
+      memoryDb.close();
+      return;
+    }
     console.log(`Archive dir: ${archRoot}`);
     console.log(`Hot db: ${hot}`);
     for (const r of rows) {
@@ -603,7 +617,6 @@ async function main() {
         `${r.root_session_id}\tmsgs=${r.message_count}\tparts=${r.part_count}\t${r.archive_path}\t${r.content_hash.slice(0, 12)}…`,
       );
     }
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now());
     if (stale.length) console.log(`\nStale roots (${cfg.archive.staleDays}d): ${stale.join(", ")}`);
     memoryDb.close();
     return;
@@ -615,15 +628,17 @@ async function main() {
       console.error("Pass --project-id or set ENGRAM_PROJECT_ID.");
       process.exit(1);
     }
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now());
+    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now(), numberArg(argv, "--limit", 100));
     const roots = rest.includes("--all") ? stale : stale.slice(0, 1);
     if (roots.length === 0) {
-      console.log("No stale roots.");
+      if (argv.includes("--json")) console.log(JSON.stringify({ exported: [], stale: 0 }, null, 2));
+      else console.log("No stale roots.");
       memoryDb.close();
       return;
     }
+    const exported: Array<{ root: string; skipped: boolean; path?: string }> = [];
     for (const root of roots) {
-      await exportRootSession({
+      const result = await exportRootSession({
         memoryDb,
         hotPath: hot,
         projectId: pid,
@@ -631,9 +646,11 @@ async function main() {
         cfg,
         home,
         force: false,
-        onProgress: (m) => console.log(m),
+        onProgress: argv.includes("--json") ? undefined : (m) => console.log(m),
       });
+      exported.push({ root, skipped: result.skipped, path: result.path });
     }
+    if (argv.includes("--json")) console.log(JSON.stringify({ exported, stale: stale.length }, null, 2));
     memoryDb.close();
     return;
   }
@@ -649,7 +666,7 @@ async function main() {
       );
       process.exit(1);
     }
-    await exportRootSession({
+    const result = await exportRootSession({
       memoryDb,
       hotPath: hot,
       projectId: pid,
@@ -657,8 +674,9 @@ async function main() {
       cfg,
       home,
       force,
-      onProgress: (m) => console.log(m),
+      onProgress: argv.includes("--json") ? undefined : (m) => console.log(m),
     });
+    if (argv.includes("--json")) console.log(JSON.stringify(result, null, 2));
     memoryDb.close();
     return;
   }
@@ -676,7 +694,8 @@ async function main() {
       projectId: pid,
       rootSessionId: root,
     });
-    console.log(r.ok ? r.detail : `FAIL: ${r.detail}`);
+    if (argv.includes("--json")) console.log(JSON.stringify(r, null, 2));
+    else console.log(r.ok ? r.detail : `FAIL: ${r.detail}`);
     memoryDb.close();
     process.exit(r.ok ? 0 : 1);
   }
@@ -697,10 +716,12 @@ async function main() {
         projectId: pid,
         rootSessionId: row.root_session_id,
       });
-      console.log(`${r.ok ? "OK" : "FAIL"}\t${row.root_session_id}\t${r.detail}`);
+      if (!argv.includes("--json"))
+        console.log(`${r.ok ? "OK" : "FAIL"}\t${row.root_session_id}\t${r.detail}`);
       if (!r.ok) ok = false;
     }
-    if (rows.length === 0) console.log("No archive rows.");
+    if (argv.includes("--json")) console.log(JSON.stringify({ ok, rows: rows.length }, null, 2));
+    else if (rows.length === 0) console.log("No archive rows.");
     memoryDb.close();
     process.exit(ok ? 0 : 1);
   }
@@ -718,7 +739,11 @@ async function main() {
       projectId: pid,
       rootSessionId: root,
     });
-    console.log(`sessions=${counts.sessions}\tmessages=${counts.messages}\tparts=${counts.parts}`);
+    console.log(
+      argv.includes("--json")
+        ? JSON.stringify(counts, null, 2)
+        : `sessions=${counts.sessions}\tmessages=${counts.messages}\tparts=${counts.parts}`,
+    );
     memoryDb.close();
     return;
   }
@@ -740,7 +765,9 @@ async function main() {
       dryRun,
     });
     console.log(
-      `${dryRun ? "Would restore" : "Restored"} sessions=${result.sessions} messages=${result.messages} parts=${result.parts}`,
+      argv.includes("--json")
+        ? JSON.stringify(result, null, 2)
+        : `${dryRun ? "Would restore" : "Restored"} sessions=${result.sessions} messages=${result.messages} parts=${result.parts}`,
     );
     memoryDb.close();
     return;
@@ -762,26 +789,32 @@ async function main() {
       query,
       limit: numberArg(argv, "--limit", 20),
     });
-    console.log(rows.length ? rows.join("\n") : "No archive matches.");
+    console.log(argv.includes("--json") ? JSON.stringify({ rows }, null, 2) : rows.length ? rows.join("\n") : "No archive matches.");
     memoryDb.close();
     return;
   }
 
   if (rest[1] === "import-memory") {
-    const root = rest[2];
+    const root = rest.slice(2).find((x) => x !== "--dry-run" && x !== "--apply" && x !== "--json");
     const pid = projectIdFromArgs(argv);
     if (!root || !pid) {
-      console.error("Usage: engram archive import-memory <rootSessionId>");
+      console.error("Usage: engram archive import-memory [--apply] <rootSessionId>");
       process.exit(1);
     }
+    const dryRun = !rest.includes("--apply");
     const result = await importArchiveToMemory({
       memoryDb,
       archiveRoot: expandArchivePath(home, cfg.archive),
       projectId: pid,
       rootSessionId: root,
       cfg,
+      dryRun,
     });
-    console.log(`Imported ${result.inserted} chunks from ${result.scannedParts} archived parts.`);
+    if (argv.includes("--json")) console.log(JSON.stringify({ ...result, dryRun }, null, 2));
+    else
+      console.log(
+        `${dryRun ? "Would import" : "Imported"} ${result.inserted} chunks from ${result.scannedParts} archived parts.`,
+      );
     memoryDb.close();
     return;
   }

@@ -43,7 +43,8 @@
     "./bridge": "./src/bridge-contract.ts"
   },
   "files": [
-    "src",
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
     "eval/fixtures",
     "skills",
     "docs",

@@ -33,10 +33,20 @@ describe("telemetry", () => {
       detail: { ftsMs: 1, vectorMs: 2 },
       timeCreated: now,
     })
+    recordMetric(db, {
+      projectId: "p1",
+      operation: "memory.search",
+      status: "error",
+      durationMs: 1,
+      detail: { apiKey: "sk-proj-secretsecret", nested: { token: "ghp_secretsecret" } },
+      timeCreated: now + 1,
+    })
 
     const rows = recentMetrics(db, "p1", 10)
-    expect(rows).toHaveLength(1)
-    expect(rows[0]?.operation).toBe("memory.search")
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.detail).not.toContain("sk-proj-secretsecret")
+    expect(rows[0]?.detail).not.toContain("ghp_secretsecret")
+    expect(rows[1]?.operation).toBe("memory.search")
     expect(formatTelemetryReport(rows)).toContain("memory.search:ok")
 
     pruneMetrics(db, "p1", 1, now + 2 * 86400000)
@@ -84,6 +94,32 @@ describe("telemetry", () => {
     logger.warn("archive", "two", undefined)
     trimLogEvents(db, "p1", 2)
     expect(recentLogEvents(db, "p1", { limit: 10 })).toHaveLength(2)
+
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("log events redact secrets and enforce max rows during runtime writes", () => {
+    const dir = path.join(os.tmpdir(), `engram-log-redact-${Date.now()}`)
+    mkdirSync(dir, { recursive: true })
+    const db = openMemoryDb(path.join(dir, "memory.db"))
+    const logger = new EngramLogger(db, "p1", {
+      ...defaultEngramConfig.telemetry,
+      eventMaxRows: 2,
+      detailMaxLength: 2000,
+    })
+
+    logger.error("retrieval", "one", new Error("failed with sk-proj-secretsecret"), {
+      authorization: "Bearer ghp_secretsecret",
+    })
+    logger.warn("retrieval", "two", { apiKey: "sk-proj-secondsecret" })
+    logger.warn("retrieval", "three", undefined)
+
+    const rows = recentLogEvents(db, "p1", { limit: 10 })
+    expect(rows).toHaveLength(2)
+    expect(JSON.stringify(rows)).not.toContain("sk-proj-secretsecret")
+    expect(JSON.stringify(rows)).not.toContain("ghp_secretsecret")
+    expect(JSON.stringify(rows)).not.toContain("sk-proj-secondsecret")
 
     db.close()
     rmSync(dir, { recursive: true, force: true })

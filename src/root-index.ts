@@ -16,18 +16,38 @@ export function indexHotRoots(opts: {
   hotPath: string
   projectId: string
   max?: number
+  maxSessionsPerRoot?: number
+  maxRowsPerRoot?: number
   dryRun?: boolean
 }): RootIndexSummary {
   const hot = new Database(opts.hotPath, { readonly: true })
   applyConnPragmas(hot)
   try {
-    const roots = hot
-      .prepare(
-        `SELECT id, title, time_created, time_updated FROM session WHERE project_id = ? AND parent_id IS NULL ORDER BY time_updated DESC`,
-      )
-      .all(opts.projectId) as RootRow[]
-    const selected = roots.slice(0, opts.max ?? roots.length)
-    const indexed = selected.map((r) => summarizeRoot(hot, opts.projectId, r))
+    const max = Number.isFinite(opts.max ?? Number.POSITIVE_INFINITY) ? opts.max : undefined
+    const roots = max
+      ? (hot
+          .prepare(
+            `SELECT id, title, time_created, time_updated
+             FROM session WHERE project_id = ? AND parent_id IS NULL
+             ORDER BY time_updated DESC LIMIT ?`,
+          )
+          .all(opts.projectId, max) as RootRow[])
+      : (hot
+          .prepare(
+            `SELECT id, title, time_created, time_updated
+             FROM session WHERE project_id = ? AND parent_id IS NULL
+             ORDER BY time_updated DESC`,
+          )
+          .all(opts.projectId) as RootRow[])
+    const indexed = roots.map((r) =>
+      summarizeRoot(
+        hot,
+        opts.projectId,
+        r,
+        opts.maxSessionsPerRoot ?? 500,
+        opts.maxRowsPerRoot ?? 5000,
+      ),
+    )
     if (!opts.dryRun) upsertRootSummaries(opts.db, opts.projectId, indexed)
     return {
       roots: roots.length,
@@ -68,22 +88,33 @@ type Summary = {
   content_hash: string
 }
 
-function summarizeRoot(hot: Database, projectId: string, root: RootRow): Summary {
+function summarizeRoot(
+  hot: Database,
+  projectId: string,
+  root: RootRow,
+  maxSessions: number,
+  maxRows: number,
+): Summary {
   const sessions = hot
     .prepare(
       `WITH RECURSIVE t(id) AS (
          SELECT id FROM session WHERE id = ? AND project_id = ?
          UNION ALL SELECT s.id FROM session s INNER JOIN t ON s.parent_id = t.id
-       ) SELECT id FROM t`,
+       ) SELECT id FROM t LIMIT ?`,
     )
-    .all(root.id, projectId) as { id: string }[]
+    .all(root.id, projectId, maxSessions) as { id: string }[]
   const ids = sessions.map((s) => s.id)
   const placeholders = ids.map(() => "?").join(",")
   const messageCount = count(hot, `SELECT count(*) AS c FROM message WHERE session_id IN (${placeholders})`, ids)
-  const partRows = hot.prepare(`SELECT data FROM part WHERE session_id IN (${placeholders})`).all(...ids) as {
+  const partCount = count(hot, `SELECT count(*) AS c FROM part WHERE session_id IN (${placeholders})`, ids)
+  const partRows = hot
+    .prepare(`SELECT data FROM part WHERE session_id IN (${placeholders}) ORDER BY time_created DESC LIMIT ?`)
+    .all(...ids, maxRows) as {
     data: string
   }[]
-  const msgRows = hot.prepare(`SELECT data FROM message WHERE session_id IN (${placeholders})`).all(...ids) as {
+  const msgRows = hot
+    .prepare(`SELECT data FROM message WHERE session_id IN (${placeholders}) ORDER BY time_created DESC LIMIT ?`)
+    .all(...ids, maxRows) as {
     data: string
   }[]
 
@@ -130,7 +161,7 @@ function summarizeRoot(hot: Database, projectId: string, root: RootRow): Summary
         root,
         ids: ids.length,
         messageCount,
-        partCount: partRows.length,
+        partCount,
         tool,
         patch,
         reasoning,
@@ -146,7 +177,7 @@ function summarizeRoot(hot: Database, projectId: string, root: RootRow): Summary
     time_updated: root.time_updated,
     child_count: Math.max(0, ids.length - 1),
     message_count: messageCount,
-    part_count: partRows.length,
+    part_count: partCount,
     assistant_count: assistant,
     user_count: user,
     tool_count: tool,
