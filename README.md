@@ -59,6 +59,8 @@ Engram is passive by default. **`<project_memory>`** and **`<!-- Engram --><engr
 
 Wave 3 adds a nullable sidecar table, **`chunk_correlation`**, instead of widening the hot `chunk` insert path. The table keys `chunk_id` to fleet IDs: `workspace_id`, `plan_id`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `spine_seq`, `artifact_ref`, and `lifecycle_object_id`, with one index per field. New captures and artifact ingestion attach rows when a valid fleet context is available; old chunks remain valid and simply have no sidecar row.
 
+Engram accepts the full host-supplied `FleetContext` at tool boundaries, but exact sidecar persistence intentionally stores only the columns above. `plan_slug` stays on the hot `chunk` row, while `concord_event_id` / `concord_event_ids` and `fleet_run_id` are used as workspace-signal terms for context ranking rather than exact `chunk_correlation` filters. This keeps the sidecar narrow; callers should not expect exact SQLite filtering on those three fields unless a future nullable migration adds them.
+
 `conflict_context` mirrors `engram context --json` for plugin callers and accepts plan/wave/agent/correlation/tool/artifact/lifecycle/concord IDs. `lifecycle_ingest` mirrors file-based artifact ingestion and returns `{applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids}`. Both tools stay local-only and do not call OpenAI unless the existing embedding/rerank path is explicitly configured with an API key.
 
 `memory`, `memory_context`, and `engram context` now default to high-precision evidence output. The context compiler favors artifact-backed plans, journals, audits, progress, root distillations, decisions, contracts, bugs, invariants, and test strategy. Raw hot DB traces are filtered or demoted unless they are explicitly correlated or requested through broad/forensic search. Evidence output stays passive: no `suggestedNextSteps`, no `<engram-hint>`, and no `<project_memory>` unless `context.proactiveHints.enabled=true`.
@@ -67,7 +69,7 @@ Wave 3 adds a nullable sidecar table, **`chunk_correlation`**, instead of wideni
 
 Conductor and other fleet plugins call `conflict_context` and `lifecycle_ingest` as native plugin tools — no shell invocation, no file parsing at the call site. Both tools are registered in `src/index.ts` and run in the same plugin process as all other Engram tools.
 
-`conflict_context` accepts any combination of `plan_slug`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `artifact_refs`, `lifecycle_object_ids`, and `concord_event_ids`. It resolves the corresponding `chunk_correlation` rows, retrieves the associated chunks via the standard hybrid pipeline, and returns a bounded evidence bundle in the same shape as `memory_context`.
+`conflict_context` accepts any combination of `plan_slug`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `artifact_refs`, `lifecycle_object_ids`, and `concord_event_ids`. Exact sidecar resolution applies to the persisted `chunk_correlation` columns; `plan_slug` and Concord event IDs also contribute retrieval terms and ranking signals. It returns a bounded evidence bundle in the same shape as `memory_context`.
 
 `lifecycle_ingest` accepts the same glob/path arguments as `engram ingest-artifacts`. By default it is a dry-run (`apply` absent or `false`); set `apply: true` to write sidecar rows. It returns `{ applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids }`.
 

@@ -133,6 +133,8 @@ Wave 3 adds a nullable sidecar table `chunk_correlation` in `src/db.ts`. It atta
 
 All columns are nullable. A missing row means the chunk pre-dates correlation tracking; it is still valid. Rows are written by `upsertChunkCorrelation` in `src/db.ts` during new captures and artifact ingestion when a valid fleet context is present.
 
+Engram may receive the full host-supplied `FleetContext`, but the exact sidecar only persists the columns listed above. `plan_slug` remains on the hot `chunk` table, and `concord_event_id` / `concord_event_ids` plus `fleet_run_id` are retrieval/ranking signals rather than exact `chunk_correlation` filters. Do not imply those fields are SQLite-indexed unless you add a nullable migration, write/read support, and tests.
+
 To query by fleet IDs directly in SQLite:
 
 ```sql
