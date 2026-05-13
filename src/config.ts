@@ -165,6 +165,8 @@ const hints = z.object({
 export const EngramConfig = z.object({
   enabled: z.boolean().default(true),
   openaiApiKey: z.string().optional(),
+  /** Max characters for all plugin tool descriptions + JSON Schemas combined (~10k tokens at 4 chars/token). */
+  pluginToolSurfaceMaxChars: z.number().int().positive().max(10_000_000).default(40_000),
   sidecar,
   capture,
   classify,
@@ -187,6 +189,7 @@ export type EngramConfig = z.infer<typeof EngramConfig>;
 /** Fully-resolved defaults (use when not reading from disk). */
 export const defaultEngramConfig = EngramConfig.parse({
   enabled: true,
+  pluginToolSurfaceMaxChars: 40_000,
   sidecar: {
     path: ".opencode/memory.db",
     dimensions: 256,
@@ -349,4 +352,14 @@ export function expandArchivePath(home: string, cfg: EngramConfig["archive"]): s
   if (cfg.path.startsWith("~/")) return path.join(home, cfg.path.slice(2));
   if (cfg.path === "~") return home;
   return cfg.path;
+}
+
+/** Env `ENGRAM_TOOL_SURFACE_MAX_CHARS` overrides config when set and valid. */
+export function resolvePluginToolSurfaceMaxChars(cfg: EngramConfig): number {
+  const raw = process.env.ENGRAM_TOOL_SURFACE_MAX_CHARS;
+  if (raw !== undefined && raw !== "") {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) return Math.min(n, 10_000_000);
+  }
+  return cfg.pluginToolSurfaceMaxChars;
 }

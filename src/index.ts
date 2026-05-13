@@ -1,8 +1,10 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin/tool";
 import { wrapPlugin } from "@jackmazac/opencode-host-adapter";
+import { resolvePluginToolSurfaceMaxChars } from "./config.ts";
 import { getRuntime } from "./runtime.ts";
 import { correlationFromUnknown } from "./fleet.ts";
+import { applyToolSurfaceBudget } from "./plugin-tool-budget.ts";
 
 const z = tool.schema;
 
@@ -28,7 +30,8 @@ export const EngramPlugin: Plugin = async (input) => {
     "experimental.chat.system.transform": async (i, o) => {
       await rt.injectSystem(i.sessionID, o.system);
     },
-    tool: {
+    tool: applyToolSurfaceBudget(
+      {
       memory: tool({
         description:
           "Search project memory for relevant past work: decisions, analyses, patterns, errors, and reasoning from previous sessions.",
@@ -177,6 +180,8 @@ export const EngramPlugin: Plugin = async (input) => {
         },
       }),
     },
+    resolvePluginToolSurfaceMaxChars(rt.cfg),
+    ),
   };
 };
 
