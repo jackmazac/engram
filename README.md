@@ -1,191 +1,40 @@
 # Engram
 
-OpenCode plugin that stores a **project memory** sidecar (`memory.db`): FTS5 full-text search, embedding blobs, streaming cosine retrieval, RRF merge, optional LLM rerank, telemetry, eval reports, archive maintenance, and curation workflows. It captures session text and tool traces, exposes **`memory`**, **`memory_context`**, **`conflict_context`**, **`lifecycle_ingest`**, **`forget`**, **`memory_feedback`**, and **`stats`** tools, and ships a small **`engram`** CLI for eval, dashboard, archive, curation, and maintenance work.
+OpenCode plugin and CLI for **local project memory**: sidecar SQLite (`memory.db`), hybrid retrieval (FTS + streaming vector + RRF), context compilation, artifact ingest, evals, archives, and telemetry.
 
-**Repository:** [github.com/jackmazac/opencode-engram](https://github.com/jackmazac/opencode-engram)
+## What it is
 
-## Requirements
+- **Plugin tools**: `memory`, `memory_context`, `conflict_context`, `lifecycle_ingest`, `memory_feedback`, `forget`, `stats`.
+- **CLI**: `bun run ./src/cli/run.ts` (see package `"bin"` for `engram` when linked).
+- **Config**: `.opencode/engram.jsonc` per worktree; schema in `src/config.ts`.
 
-- [Bun](https://bun.sh) (runtime and tests)
-- An **OpenAI API key** (or compatible usage) for embeddings, classification batches, and rerank when enabled
+Correlation for fleet IDs uses the **`chunk_correlation`** sidecar (narrow columns only). `memory_context` is **passive by default** (no injected hints unless `context.proactiveHints.enabled`).
 
-## Install (OpenCode)
-
-Use a **`file://`** URL to the plugin entry (OpenCode imports it directly; no publish step required):
+## Quick start
 
 ```json
 {
-  "plugin": ["file:///Users/you/Developer/engram/src/index.ts"]
+  "plugin": ["file:///path/to/engram/src/index.ts"]
 }
 ```
 
-Adjust the path to your clone. Restart OpenCode after changing `plugin`.
-
-Per **worktree**, optional overrides live in **`.opencode/engram.jsonc`** (or `engram.json`), merged on top of built-in defaults. The schema is defined in [`src/config.ts`](src/config.ts) (`defaultEngramConfig`).
-
-Engram is standalone. Optional integration profiles can ingest generic OpenCode artifacts, but Engram does not require the Conductor/Orchestrator setup.
-
-## API key
-
-Resolution order (see [`src/openai.ts`](src/openai.ts)):
-
-1. `openaiApiKey` in `engram.jsonc`
-2. Environment variable **`OPENAI_API_KEY`**
-3. **macOS Keychain** — generic password: service **`OPENAI_KEYCHAIN_SERVICE`** (default `OPENAI_API_KEY`), optional account **`OPENAI_KEYCHAIN_ACCOUNT`**
-
-Example Keychain item:
-
-```bash
-security add-generic-password -s OPENAI_API_KEY -a default -w "sk-..."
-```
-
-## Orchestrator hint
-
-Engram is passive by default. **`<project_memory>`** and **`<!-- Engram --><engram-hint>…`** system injection are off unless `context.proactiveHints.enabled` is explicitly `true`. When enabled, `hints.orchestrator` still controls the short hint block and `proactive` still controls retrieved `<project_memory>` (which needs an API key). Utility prompts (title generator, conversation summarizer, etc.) are skipped.
-
-## Tools
-
-| Tool              | Purpose                                                               |
-| ----------------- | --------------------------------------------------------------------- |
-| `memory`          | Default: high-precision evidence bundle. Use `scope: "broad"` or `"forensic"` for raw hybrid search. |
-| `memory_context`  | Build a bounded evidence bundle; suggested next steps are opt-in only. |
-| `conflict_context` | Fetch correlation-aware evidence by fleet IDs/artifacts/lifecycle.    |
-| `lifecycle_ingest` | Ingest file-based lifecycle/artifact outputs; dry-run by default.      |
-| `memory_feedback` | Mark retrieved chunks useful/not useful so future ranking can adapt.  |
-| `forget`          | Drop chunks matching a pattern / scope (see config limits).           |
-| `stats`           | Sidecar stats, telemetry summaries, and embedding health.             |
-
-## Fleet correlation (Wave 3)
-
-Wave 3 adds a nullable sidecar table, **`chunk_correlation`**, instead of widening the hot `chunk` insert path. The table keys `chunk_id` to fleet IDs: `workspace_id`, `plan_id`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `spine_seq`, `artifact_ref`, and `lifecycle_object_id`, with one index per field. New captures and artifact ingestion attach rows when a valid fleet context is available; old chunks remain valid and simply have no sidecar row.
-
-Engram accepts the full host-supplied `FleetContext` at tool boundaries, but exact sidecar persistence intentionally stores only the columns above. `plan_slug` stays on the hot `chunk` row, while `concord_event_id` / `concord_event_ids` and `fleet_run_id` are used as workspace-signal terms for context ranking rather than exact `chunk_correlation` filters. This keeps the sidecar narrow; callers should not expect exact SQLite filtering on those three fields unless a future nullable migration adds them.
-
-`conflict_context` mirrors `engram context --json` for plugin callers and accepts plan/wave/agent/correlation/tool/artifact/lifecycle/concord IDs. `lifecycle_ingest` mirrors file-based artifact ingestion and returns `{applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids}`. Both tools stay local-only and do not call OpenAI unless the existing embedding/rerank path is explicitly configured with an API key.
-
-`memory`, `memory_context`, and `engram context` now default to high-precision evidence output. The context compiler favors artifact-backed plans, journals, audits, progress, root distillations, decisions, contracts, bugs, invariants, and test strategy. Raw hot DB traces are filtered or demoted unless they are explicitly correlated or requested through broad/forensic search. Evidence output stays passive: no `suggestedNextSteps`, no `<engram-hint>`, and no `<project_memory>` unless `context.proactiveHints.enabled=true`.
-
-## Fleet integration
-
-Conductor and other fleet plugins call `conflict_context` and `lifecycle_ingest` as native plugin tools — no shell invocation, no file parsing at the call site. Both tools are registered in `src/index.ts` and run in the same plugin process as all other Engram tools.
-
-`conflict_context` accepts any combination of `plan_slug`, `wave_id`, `agent_run_id`, `correlation_id`, `tool_call_id`, `artifact_refs`, `lifecycle_object_ids`, and `concord_event_ids`. Exact sidecar resolution applies to the persisted `chunk_correlation` columns; `plan_slug` and Concord event IDs also contribute retrieval terms and ranking signals. It returns a bounded evidence bundle in the same shape as `memory_context`.
-
-`lifecycle_ingest` accepts the same glob/path arguments as `engram ingest-artifacts`. By default it is a dry-run (`apply` absent or `false`); set `apply: true` to write sidecar rows. It returns `{ applied, discovered, ingested, skipped, artifact_refs, lifecycle_object_ids }`.
-
-Neither tool calls OpenAI unless the embedding/rerank path is explicitly configured with an API key — the correlation filter and artifact ingest paths are fully local.
-
-## Agent Skill
-
-Engram ships an optional OpenCode skill at [`skills/engram-memory/SKILL.md`](skills/engram-memory/SKILL.md). Install it into `.opencode/skills/engram-memory/SKILL.md` for a project or `~/.config/opencode/skills/engram-memory/SKILL.md` globally to teach agents when to use `memory_context`, `memory`, `memory_feedback`, and `stats`.
-
-The skill is intentionally lightweight: it teaches mode selection (`plan`, `implement`, `review`, `debug`, `audit`, `handoff`), how to read context bundle sections and `why:` explanations, when to give feedback, and how to check memory health.
-
-## CLI (`engram`)
-
-From a clone of this repo:
-
-```bash
-bun install
-export ENGRAM_PROJECT_ID=<uuid-from-opencode-project-table>
-# optional: --project-id <uuid>
-
-bun run ./src/cli/run.ts archive list --worktree /path/to/project
-bun run ./src/cli/run.ts archive export <rootSessionId> [--force] --worktree /path/to/project
-bun run ./src/cli/run.ts archive export-stale [--all] --worktree /path/to/project
-bun run ./src/cli/run.ts archive verify <rootSessionId> --worktree /path/to/project
-bun run ./src/cli/run.ts archive verify-all --worktree /path/to/project
-bun run ./src/cli/run.ts archive inspect <rootSessionId> --worktree /path/to/project
-bun run ./src/cli/run.ts archive search <rootSessionId> "query" --worktree /path/to/project
-bun run ./src/cli/run.ts archive restore [--apply] <rootSessionId> --worktree /path/to/project
-bun run ./src/cli/run.ts archive import-memory [--apply] <rootSessionId> --worktree /path/to/project
-bun run ./src/cli/run.ts archive delete [--vacuum] <rootSessionId> ... --worktree /path/to/project
-bun run ./src/cli/run.ts ingest-artifacts [--apply] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts index-hot [--apply] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts backfill-hot [--apply] [--strategy priority] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts distill [--apply] [--top 20] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts relations [--apply] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts context "query" --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts eval run --fixture eval/fixtures/core.json --worktree /path/to/project
-     # add --sidecar when fixture expected IDs already exist in the project's memory.db
-     # context bundles: bun run ./src/cli/run.ts eval context --sidecar --fixture /path/to/context-fixture.json --worktree /path/to/project
-bun run ./src/cli/run.ts dashboard [--json] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts maintain [--apply] [--health-report] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts curate [--apply|--record] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts telemetry [--events] [--json] --project-id <uuid> --worktree /path/to/project
-bun run ./src/cli/run.ts sprint [--rows 3000] [--local-only] [--rerank] --worktree /path/to/project
-bun run ./src/cli/run.ts doctor [--json] --worktree /path/to/project
-bun run ./src/cli/run.ts status [--json] --worktree /path/to/project
-bun run ./src/cli/run.ts check [--json] --worktree /path/to/project
-bun run ./src/cli/run.ts repair-sidecar [--apply] --worktree /path/to/project
-```
-
-`archive delete` verifies every requested archive before touching the hot DB. `archive restore` and `archive import-memory` are dry-run by default; pass `--apply` only after testing restore against a copy of `opencode.db` or reviewing the sidecar import summary.
-
-`ingest-artifacts`, `index-hot`, `backfill-hot`, `distill`, `relations`, and `context` are the long-term learning pipeline. They discover high-signal OpenCode artifacts, index root session trees, selectively backfill useful hot DB evidence, create deterministic root summaries, connect superseded memories, and produce bounded preflight context bundles. Mutating learning commands are dry-run by default and require `--apply`; `context` is read-only.
-
-Automatic legacy hot DB backfill is **opt-in** (`backfill.auto: false`) so the live plugin runtime never scans large OpenCode databases by default. Prefer `index-hot` and `backfill-hot` for explicit high-signal learning runs; if scheduled legacy backfill is enabled locally, keep `backfill.repeat: false` unless you have measured runtime impact.
-
-`eval` runs checked-in retrieval fixtures and records drift metadata. `dashboard` is CLI/JSON-only and summarizes memory health, archives, evals, telemetry, log events, and learning coverage. `maintain` performs dry-run or explicit maintenance actions. `curate` proposes duplicate/low-value chunk cleanup without writes by default; use `--record` to persist a proposal run without applying, or `--apply` to delete proposed chunks. `telemetry` is read-only and summarizes sidecar operation metrics and bounded log events recorded by live plugin usage. `sprint` runs a manual latency/memory sprint: a deterministic local retrieval workload plus, when an OpenAI key resolves, a small live embedding retrieval accuracy fixture.
-
-The [`package.json`](package.json) `"bin"` field exposes the same entry as the `engram` command if you `bun link` or install the package locally.
-
-## Verify it is working
-
-1. Load the plugin via `file://`, open a project, send an assistant turn.
-2. Check **`.opencode/memory.db`** for `chunk` / `chunk_fts` rows.
-3. Invoke **`memory`** from an agent and confirm a high-precision evidence bundle; use `scope: "broad"` only when checking raw hybrid search / `retrieval_log`.
-4. Run `bun run ./src/cli/run.ts eval run --fixture eval/fixtures/core.json --worktree .` and confirm a 100% core fixture report.
-5. Run `bun run ./src/cli/run.ts dashboard --project-id engram-eval-core --worktree .` after eval and confirm the latest eval appears.
-6. With **`proactive.enabled`**, confirm `<project_memory>` appears on normal chat sessions that carry a `sessionID` (paths without a session skip injection).
+Optional OpenAI key for embeddings/rerank; local paths work without it. Repository: [github.com/jackmazac/opencode-engram](https://github.com/jackmazac/opencode-engram).
 
 ## Development
 
-Run from **this directory** (not a monorepo root):
-
 ```bash
 bun install
-bun run typecheck
-bun test --timeout 30000
 bun run check
 bun run smoke:runtime
 ```
 
-Tests include an **optional live** suite (`test/openai-live-nano.test.ts`) when a key resolves via env or Keychain. Performance checks use a real in-memory SQLite path in `test/perf-operations.test.ts`.
+Eval fixtures: `eval/fixtures/`. Full conventions: **`AGENTS.md`**.
 
-## Eval and manual testing
+## Fleet position
 
-- Checked-in retrieval fixtures live in [`eval/fixtures`](eval/fixtures).
-- `engram eval run` reports recall@K, hit@K, MRR, p50, and p95 latency. By default fixtures are synthetic and seed their own chunks; `--sidecar` evaluates against an existing project sidecar and fixture expected IDs must already exist in that `memory.db`.
-- `engram eval context` reports section hit, recall@budget, stale/noise rates, and latency for compiled context bundles.
-- `engram telemetry --events` reports bounded lifecycle/failure events without mutating the sidecar; `maintain --prune-telemetry --apply` prunes both metrics and events.
-- `engram ingest-artifacts` should run before broad hot DB backfills; plans, audits, journals, progress files, and distillations are higher signal than raw tool output.
-- `engram context` is the CLI/TUI-friendly Orchestrator bridge: it returns a bounded preflight bundle without requiring the custom Orchestrator plugin.
-- The bridge contract is exported from `opencode-engram/bridge` for optional integrations.
-- `engram sprint` measures local FTS/vector latency and can run a small live retrieval fixture.
-- See [`docs/manual-testing.md`](docs/manual-testing.md) for the current sprint checklist.
-
-## Local OpenCode install notes
-
-This repo is intended to load via a direct `file://` plugin entry during local development. See [`docs/opencode-install.md`](docs/opencode-install.md) for the current global config and prompt integration checklist.
-
-## Performance (expectations)
-
-- Capture enqueue is designed to stay lightweight on typical dev hardware.
-- Vector search intentionally remains the canonical streaming brute-force implementation for now. There is no sqlite-vec fallback path; a vector index should only replace the canonical backend after eval/telemetry prove it is necessary.
-- Archive export throughput depends on `archive.batchSize` and DB size; ballpark on the order of seconds per thousand messages is normal.
-
-## Retention
-
-Defaults remain unchanged: operation metrics retain **14 days**, log events retain **14 days**, and log events are capped at **5000 rows**. Runtime logging enforces `eventMaxRows` on each persisted log event so events cannot grow without bound; age-based metric/event pruning remains explicit. Tune these in `.opencode/engram.jsonc` under `telemetry.retainDays`, `telemetry.eventRetainDays`, and `telemetry.eventMaxRows`. Apply age pruning explicitly with:
-
-```bash
-bun run ./src/cli/run.ts maintain --prune-telemetry --apply --project-id <uuid> --worktree /path/to/project
-```
-
-## Ownership
-
-Engram owns local memory, artifact ingestion, retention, retrieval, context bundles, archive workflows, and memory telemetry. Engram does **not** own doctrine, lifecycle policy, code-graph truth, live edit locks, fleet install/update, or OpenCode config generation; those belong to Conductor, Codemem, Concord, and opencode-fleet respectively.
+| Owns | Does not own |
+|------|----------------|
+| Memory, ingest, retrieval, context bundles, archives | Orchestration (Conductor), code-graph (Codemem), locks (Concord), fleet CLI (opencode-fleet) |
 
 ## License
 

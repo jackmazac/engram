@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildArtifactRef, decodeFleetContext } from "@jackmazac/opencode-fleet-contracts";
+import { buildArtifactRef, decodeFleetContext } from "@mazac-fox/opencode-fleet-contracts";
 import { buildContextBundle, formatContextBundle } from "../src/context.ts";
 import { insertChunkCorrelation, openMemoryDb } from "../src/db.ts";
 

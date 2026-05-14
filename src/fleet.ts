@@ -1,9 +1,9 @@
-import { extractFleetContextFromUnknown } from "@jackmazac/opencode-host-adapter";
+import { extractFleetContextFromUnknown } from "@mazac-fox/opencode-host-adapter";
 import {
   emptyFleetContext,
   fleetContextToJson,
   mergeFleetContext,
-} from "@jackmazac/opencode-fleet-contracts";
+} from "@mazac-fox/opencode-fleet-contracts";
 import type { EngramCorrelation } from "./types.ts";
 
 export function correlationFromUnknown(...values: unknown[]): EngramCorrelation | null {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { decodeFleetContext } from "@jackmazac/opencode-fleet-contracts";
+import { decodeFleetContext } from "@mazac-fox/opencode-fleet-contracts";
 import EngramPlugin from "../src/index.ts";
 import { insertChunkCorrelation } from "../src/db.ts";
 import { getRuntime } from "../src/runtime.ts";

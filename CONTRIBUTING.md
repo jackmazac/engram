@@ -52,12 +52,12 @@ args: { foo: z.string(), count: z.number().optional() }
 args: z.object({ foo: z.string(), count: z.number().optional() })
 ```
 
-The `@jackmazac/opencode-host-adapter` wrapper rejects ZodObject args at registration with a clear error message. The contract test (`bun test test/plugin-contract.test.ts`) exercises this.
+The `@mazac-fox/opencode-host-adapter` wrapper rejects ZodObject args at registration with a clear error message. The contract test (`bun test test/plugin-contract.test.ts`) exercises this.
 
 ### Wrap the default export with `wrapPlugin`
 
 ```ts
-import { wrapPlugin } from "@jackmazac/opencode-host-adapter";
+import { wrapPlugin } from "@mazac-fox/opencode-host-adapter";
 
 export default wrapPlugin(EngramPlugin, { name: "engram" });
 ```

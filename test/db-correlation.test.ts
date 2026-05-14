@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { decodeFleetContext } from "@jackmazac/opencode-fleet-contracts";
+import { decodeFleetContext } from "@mazac-fox/opencode-fleet-contracts";
 import {
   insertChunkCorrelation,
   migrateMemoryDb,

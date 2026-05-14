@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin/tool";
-import { wrapPlugin } from "@jackmazac/opencode-host-adapter";
+import { wrapPlugin } from "@mazac-fox/opencode-host-adapter";
 import { resolvePluginToolSurfaceMaxChars } from "./config.ts";
 import { getRuntime } from "./runtime.ts";
 import { correlationFromUnknown } from "./fleet.ts";

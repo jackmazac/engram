@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import path from "node:path";
 import type { Database } from "bun:sqlite";
 import { ulid } from "ulid";
-import { buildArtifactRef } from "@jackmazac/opencode-fleet-contracts";
+import { buildArtifactRef } from "@mazac-fox/opencode-fleet-contracts";
 import type { EngramConfig } from "./config.ts";
 import { insertChunkCorrelation } from "./db.ts";
 import { withArtifactCorrelation } from "./fleet.ts";

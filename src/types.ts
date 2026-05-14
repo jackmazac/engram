@@ -1,4 +1,4 @@
-import type { FleetContext } from "@jackmazac/opencode-fleet-contracts";
+import type { FleetContext } from "@mazac-fox/opencode-fleet-contracts";
 
 export type ChunkInsert = {
   id: string;

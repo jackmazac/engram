@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-engram",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Long-term project memory, evals, telemetry, and archive workflows for OpenCode.",
   "type": "module",
   "license": "MIT",
@@ -24,10 +24,12 @@
     "eval"
   ],
   "scripts": {
+    "prepack": "node ./scripts/npm-prepack-strip-overrides.mjs",
+    "postpack": "node ./scripts/npm-postpack-restore-package-json.mjs",
     "build": "tsgo --noEmit",
     "check": "bun run lint:no-zod && bun run typecheck && bun test --timeout 30000",
     "doctor": "bun src/cli/run.ts doctor --json",
-    "lint:no-zod": "bun run ./node_modules/@jackmazac/opencode-host-adapter/src/cli/check-no-zod-import.ts src/",
+    "lint:no-zod": "bun run ./node_modules/@mazac-fox/opencode-host-adapter/src/cli/check-no-zod-import.ts src/",
     "smoke:runtime": "bun scripts/runtime-smoke.ts",
     "sprint": "bun run ./src/cli/run.ts sprint --local-only --rows 3000 --worktree .",
     "status": "bun src/cli/run.ts status --json",
@@ -43,7 +45,7 @@
     "./bridge": "./src/bridge-contract.ts"
   },
   "files": [
-    "src/**/*.ts",
+    "src",
     "!src/**/*.test.ts",
     "eval/fixtures",
     "skills",
@@ -51,10 +53,14 @@
     "README.md",
     "LICENSE"
   ],
+  "overrides": {
+    "@mazac-fox/opencode-fleet-contracts": "file:../opencode-fleet-contracts",
+    "@mazac-fox/opencode-host-adapter": "file:../opencode-host-adapter"
+  },
   "dependencies": {
     "@ai-sdk/openai": "2.0.89",
-    "@jackmazac/opencode-fleet-contracts": "file:../opencode-fleet-contracts",
-    "@jackmazac/opencode-host-adapter": "file:/Users/jack.mazac/Developer/opencode-host-adapter",
+    "@mazac-fox/opencode-fleet-contracts": "^0.1.0",
+    "@mazac-fox/opencode-host-adapter": "^0.1.0",
     "@opencode-ai/plugin": "1.14.31",
     "@opencode-ai/sdk": "1.3.3",
     "ai": "5.0.124",

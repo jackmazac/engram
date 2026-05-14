@@ -204,7 +204,7 @@ The contracts package defines which artifact kinds fleet tools emit; Engram infe
 
 ## Canonical Contracts Boundary
 
-`src/bridge-contract.ts` and the `@jackmazac/opencode-fleet-contracts` package are the canonical shared types for fleet integration. When `conflict_context` or `lifecycle_ingest` decode an incoming `FleetContext` object:
+`src/bridge-contract.ts` and the `@mazac-fox/opencode-fleet-contracts` package are the canonical shared types for fleet integration. When `conflict_context` or `lifecycle_ingest` decode an incoming `FleetContext` object:
 
 - Decode at the plugin boundary (in the tool `execute` handler), not deep in internal functions.
 - Use the Zod schema from `bridge-contract.ts` or the contracts package — do not redefine the shape.

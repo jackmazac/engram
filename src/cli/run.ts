@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { makeHealthReport, type HealthCheckStatus } from "@jackmazac/opencode-fleet-contracts";
+import { makeHealthReport, type HealthCheckStatus } from "@mazac-fox/opencode-fleet-contracts";
 import {
   deleteSubtreeFromHot,
   exportRootSession,
