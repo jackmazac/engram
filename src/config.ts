@@ -57,6 +57,7 @@ const runtime = z.object({
   writeIntervalMs: z.number().int().positive().default(500),
   writeBatchSize: z.number().int().positive().default(50),
   writeQueueMax: z.number().int().positive().default(500),
+  systemTransformDeadlineMs: z.number().int().positive().default(200),
 });
 
 const rerank = z.object({
@@ -230,6 +231,7 @@ export const defaultEngramConfig = EngramConfig.parse({
     writeIntervalMs: 500,
     writeBatchSize: 50,
     writeQueueMax: 500,
+    systemTransformDeadlineMs: 200,
   },
   rerank: {
     model: "gpt-5.4-nano",

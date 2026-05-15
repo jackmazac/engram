@@ -5,10 +5,11 @@ import { ulid } from "ulid";
 import type { EngramConfig } from "./config.ts";
 import type { ChunkCorrelationFilters, ChunkCorrelationRow, EngramCorrelation } from "./types.ts";
 
-const busyMs = 5000;
+const maintenanceBusyMs = 5000;
+const liveBusyMs = 250;
 
 /** WAL + safety for the Engram sidecar DB (create/migrate). */
-export function applySidecarPragmas(db: Database) {
+export function applySidecarPragmas(db: Database, busyMs = maintenanceBusyMs) {
   db.run(`PRAGMA busy_timeout = ${busyMs};`);
   db.run("PRAGMA journal_mode = WAL;");
   db.run("PRAGMA synchronous = NORMAL;");
@@ -16,7 +17,7 @@ export function applySidecarPragmas(db: Database) {
 }
 
 /** Shared hot CLI connection: FK checks + brief busy wait under contention. */
-export function applyConnPragmas(db: Database) {
+export function applyConnPragmas(db: Database, busyMs = maintenanceBusyMs) {
   db.run("PRAGMA foreign_keys = ON;");
   db.run(`PRAGMA busy_timeout = ${busyMs};`);
 }
@@ -24,6 +25,13 @@ export function applyConnPragmas(db: Database) {
 export function openMemoryDb(file: string): Database {
   const db = new Database(file, { create: true });
   applySidecarPragmas(db);
+  migrate(db);
+  return db;
+}
+
+export function openMemoryDbLive(file: string): Database {
+  const db = new Database(file, { create: true });
+  applySidecarPragmas(db, liveBusyMs);
   migrate(db);
   return db;
 }

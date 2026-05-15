@@ -36,12 +36,13 @@ import {
 import { distillRoots, formatDistillSummary } from "../distill.ts";
 import { formatContextEvalReport, formatEvalReport, runContextEval, runEval } from "../eval.ts";
 import { buildEngramHealthReport, formatEngramHealthReport } from "../health.ts";
-import { formatHotBackfillSummary, runBackfillHotJob, type BackfillStrategy } from "../hot-backfill.ts";
 import {
-  formatEventReport,
-  recentLogEvents,
-  type LogLevel,
-} from "../logger.ts";
+  backfillHot,
+  formatHotBackfillSummary,
+  runBackfillHotJob,
+  type BackfillStrategy,
+} from "../hot-backfill.ts";
+import { formatEventReport, recentLogEvents, type LogLevel } from "../logger.ts";
 import { runMaintenance } from "../maintenance.ts";
 import { runManualSprint } from "../manual-sprint.ts";
 import { defaultHotDbPath } from "../paths.ts";
@@ -323,7 +324,11 @@ async function main() {
       kinds,
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
     });
-    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatArtifactIngestSummary(summary));
+    console.log(
+      argv.includes("--json")
+        ? JSON.stringify(summary, null, 2)
+        : formatArtifactIngestSummary(summary),
+    );
     memoryDb.close();
     return;
   }
@@ -341,7 +346,9 @@ async function main() {
       max: numberArg(argv, "--max", Number.POSITIVE_INFINITY),
       dryRun: !argv.includes("--apply"),
     });
-    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRootIndexSummary(summary));
+    console.log(
+      argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRootIndexSummary(summary),
+    );
     memoryDb.close();
     return;
   }
@@ -353,22 +360,39 @@ async function main() {
       process.exit(1);
     }
     const strategy = (valueArg(argv, "--strategy") ?? "priority") as BackfillStrategy;
-    const result = runBackfillHotJob({
-      db: memoryDb,
-      hotPath: hot,
-      projectId: pid,
-      cfg,
-      strategy,
-      dryRun: !argv.includes("--apply"),
-      maxRoots: numberArg(argv, "--max-roots", 10),
-      maxParts: numberArg(argv, "--max-parts", 500),
-      leaseOwner: "engram-cli",
-    });
-    console.log(
-      argv.includes("--json")
-        ? JSON.stringify({ summary: result.summary, job: result.job }, null, 2)
-        : formatHotBackfillSummary(result.summary),
-    );
+    if (!argv.includes("--apply")) {
+      const summary = backfillHot({
+        db: memoryDb,
+        hotPath: hot,
+        projectId: pid,
+        cfg,
+        strategy,
+        dryRun: true,
+        maxRoots: numberArg(argv, "--max-roots", 10),
+        maxParts: numberArg(argv, "--max-parts", 500),
+      });
+      console.log(
+        argv.includes("--json")
+          ? JSON.stringify({ summary }, null, 2)
+          : formatHotBackfillSummary(summary),
+      );
+    } else {
+      const result = runBackfillHotJob({
+        db: memoryDb,
+        hotPath: hot,
+        projectId: pid,
+        cfg,
+        strategy,
+        maxRoots: numberArg(argv, "--max-roots", 10),
+        maxParts: numberArg(argv, "--max-parts", 500),
+        leaseOwner: "engram-cli",
+      });
+      console.log(
+        argv.includes("--json")
+          ? JSON.stringify({ summary: result.summary, job: result.job }, null, 2)
+          : formatHotBackfillSummary(result.summary),
+      );
+    }
     memoryDb.close();
     return;
   }
@@ -386,7 +410,9 @@ async function main() {
       top: numberArg(argv, "--top", 20),
       dryRun: !argv.includes("--apply"),
     });
-    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatDistillSummary(summary));
+    console.log(
+      argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatDistillSummary(summary),
+    );
     memoryDb.close();
     return;
   }
@@ -403,7 +429,9 @@ async function main() {
       dryRun: !argv.includes("--apply"),
       max: numberArg(argv, "--max", 100),
     });
-    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRelationSummary(summary));
+    console.log(
+      argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatRelationSummary(summary),
+    );
     memoryDb.close();
     return;
   }
@@ -579,7 +607,9 @@ async function main() {
       record: argv.includes("--record"),
       max: numberArg(argv, "--max", 100),
     });
-    console.log(argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatCurationSummary(summary));
+    console.log(
+      argv.includes("--json") ? JSON.stringify(summary, null, 2) : formatCurationSummary(summary),
+    );
     memoryDb.close();
     return;
   }
@@ -587,6 +617,7 @@ async function main() {
   const rest = argv.filter(
     (x, i) =>
       !(
+        x === "--json" ||
         argv[i - 1] === "--worktree" ||
         x === "--worktree" ||
         argv[i - 1] === "--project-id" ||
@@ -604,7 +635,13 @@ async function main() {
     }
     const rows = listArchiveRows(memoryDb, pid);
     const archRoot = expandArchivePath(home, cfg.archive);
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now(), numberArg(argv, "--limit", 100));
+    const stale = staleRootIds(
+      hot,
+      pid,
+      cfg.archive.staleDays,
+      Date.now(),
+      numberArg(argv, "--limit", 100),
+    );
     if (argv.includes("--json")) {
       console.log(JSON.stringify({ archiveDir: archRoot, hotDb: hot, rows, stale }, null, 2));
       memoryDb.close();
@@ -628,7 +665,13 @@ async function main() {
       console.error("Pass --project-id or set ENGRAM_PROJECT_ID.");
       process.exit(1);
     }
-    const stale = staleRootIds(hot, pid, cfg.archive.staleDays, Date.now(), numberArg(argv, "--limit", 100));
+    const stale = staleRootIds(
+      hot,
+      pid,
+      cfg.archive.staleDays,
+      Date.now(),
+      numberArg(argv, "--limit", 100),
+    );
     const roots = rest.includes("--all") ? stale : stale.slice(0, 1);
     if (roots.length === 0) {
       if (argv.includes("--json")) console.log(JSON.stringify({ exported: [], stale: 0 }, null, 2));
@@ -650,7 +693,8 @@ async function main() {
       });
       exported.push({ root, skipped: result.skipped, path: result.path });
     }
-    if (argv.includes("--json")) console.log(JSON.stringify({ exported, stale: stale.length }, null, 2));
+    if (argv.includes("--json"))
+      console.log(JSON.stringify({ exported, stale: stale.length }, null, 2));
     memoryDb.close();
     return;
   }
@@ -789,7 +833,13 @@ async function main() {
       query,
       limit: numberArg(argv, "--limit", 20),
     });
-    console.log(argv.includes("--json") ? JSON.stringify({ rows }, null, 2) : rows.length ? rows.join("\n") : "No archive matches.");
+    console.log(
+      argv.includes("--json")
+        ? JSON.stringify({ rows }, null, 2)
+        : rows.length
+          ? rows.join("\n")
+          : "No archive matches.",
+    );
     memoryDb.close();
     return;
   }

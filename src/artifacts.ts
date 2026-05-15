@@ -149,7 +149,6 @@ export function ingestArtifacts(opts: {
         if (!src) continue;
         for (const item of row.parsed) {
           const h = contentHash(item.content);
-          const legacyRef = `artifact:${row.source.rel}:${h}`;
           const canonical = buildArtifactRef({ kind: item.kind, path: row.source.rel, hash: h });
           const ref = canonical.ref;
           const lifecycleObjectId = lifecycleObjectIdFor(row.source, item);
@@ -168,11 +167,7 @@ export function ingestArtifacts(opts: {
             item.time,
             now,
           );
-          if (
-            existingChunk.get(opts.projectId, ref) ||
-            existingChunk.get(opts.projectId, legacyRef)
-          )
-            continue;
+          if (existingChunk.get(opts.projectId, ref)) continue;
           const chunkId = ulid();
           insertChunk.run(
             chunkId,
@@ -285,7 +280,8 @@ function parseSource(source: Source, raw: string, mtime: number): Item[] {
   if (source.kind === "lifecycle" || source.kind === "concord_collision") {
     return [parseStructuredArtifact(source, raw, mtime)].filter((x) => x.content);
   }
-  if (source.kind === "plan" || source.kind === "audit") return parseMarkdownArtifact(source, raw, mtime);
+  if (source.kind === "plan" || source.kind === "audit")
+    return parseMarkdownArtifact(source, raw, mtime);
   const title = firstTitle(raw) ?? path.basename(source.rel);
   const slug = path.basename(source.rel).replace(/\.[^.]+$/, "");
   return [{ kind: source.kind, title, slug, content: raw.trim(), time: Math.floor(mtime) }].filter(
@@ -438,7 +434,11 @@ function walkKind(worktree: string, rel: string, kind: ArtifactKind, exts: strin
       if (ent.isDirectory()) walk(file);
       else if (exts.includes(path.extname(ent.name))) {
         const realFile = safeExistingInside(worktree, file);
-        out.push({ kind, file: realFile, rel: normalizeRel(path.relative(realWorktree, realFile)) });
+        out.push({
+          kind,
+          file: realFile,
+          rel: normalizeRel(path.relative(realWorktree, realFile)),
+        });
       }
     }
   };

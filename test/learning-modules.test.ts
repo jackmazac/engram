@@ -7,10 +7,11 @@ import { ingestArtifacts } from "../src/artifacts.ts";
 import { buildContextBundle, formatContextBundle } from "../src/context.ts";
 import { defaultEngramConfig } from "../src/config.ts";
 import { distillRoots } from "../src/distill.ts";
+import { contentHash } from "../src/hash.ts";
 import { backfillHot } from "../src/hot-backfill.ts";
 import { buildMemoryRelations } from "../src/relations.ts";
 import { indexHotRoots } from "../src/root-index.ts";
-import { openMemoryDb } from "../src/db.ts";
+import { openMemoryDb, readChunkCorrelation } from "../src/db.ts";
 
 describe("learning modules", () => {
   test("ingests artifacts and builds preflight context", () => {
@@ -65,6 +66,72 @@ describe("learning modules", () => {
     expect(formatted).toContain("Must Know");
     expect(formatted).toContain("backfill cursor");
     expect(formatted).toContain("why:");
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("artifact ingest is canonical-only and does not reuse legacy refs", () => {
+    const dir = path.join(os.tmpdir(), `engram-learning-artifact-cutover-${Date.now()}`);
+    mkdirSync(path.join(dir, ".opencode", "plans"), { recursive: true });
+    const rel = ".opencode/plans/legacy.md";
+    const content = "# Legacy Plan\nPlan body";
+    writeFileSync(path.join(dir, rel), `${content}\n`);
+    const db = openMemoryDb(path.join(dir, "memory.db"));
+    const legacyRef = `artifact:${rel}:${contentHash(content)}`;
+    db.prepare(
+      `INSERT INTO chunk (
+        id, session_id, message_id, part_id, project_id, role, agent, model, content_type, content,
+        file_paths, tool_name, tool_status, output_head, output_tail, output_length, error_class,
+        time_created, content_hash, root_session_id, session_depth, plan_slug, source_kind, source_ref, authority
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      "legacy-chunk",
+      "artifact:plan",
+      legacyRef,
+      null,
+      "p1",
+      "assistant",
+      "engram-artifact",
+      null,
+      "plan",
+      content,
+      JSON.stringify([rel]),
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      Date.now(),
+      contentHash(content),
+      null,
+      null,
+      "legacy",
+      "plan",
+      legacyRef,
+      9,
+    );
+
+    const applied = ingestArtifacts({
+      db,
+      worktree: dir,
+      projectId: "p1",
+      cfg: defaultEngramConfig,
+      dryRun: false,
+    });
+    expect(applied.chunksInserted).toBe(1);
+    expect(applied.artifact_refs).toHaveLength(1);
+    const canonicalRef = applied.artifact_refs[0];
+    if (!canonicalRef) throw new Error("missing canonical ref");
+    const canonical = db
+      .prepare(`SELECT id, source_ref FROM chunk WHERE project_id = ? AND source_ref = ?`)
+      .get("p1", canonicalRef) as { id: string; source_ref: string } | undefined;
+    expect(canonical?.source_ref).toBe(canonicalRef);
+    expect(canonical?.id).not.toBe("legacy-chunk");
+    expect(canonical ? readChunkCorrelation(db, canonical.id)?.artifact_ref : null).toBe(
+      canonicalRef,
+    );
 
     db.close();
     rmSync(dir, { recursive: true, force: true });

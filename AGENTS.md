@@ -167,6 +167,19 @@ To re-enable proactive injection, set in `.opencode/engram.jsonc`:
 
 The `config.context.proactiveHints.enabled` flag is defined in `src/config.ts`. Regression tests must verify that the default (flag absent or `false`) produces no `suggestedNextSteps` and no injected blocks. Do not introduce any code path that emits hints outside this gate.
 
+## Non-Blocking Runtime Safety
+
+Engram is optional memory infrastructure. It must never become part of OpenCode's critical path for normal chat, tool execution, or plugin loading.
+
+- Plugin load must be fail-soft. Do not synchronously open, migrate, or repair the sidecar in `EngramPlugin`; use the lazy `EngramRuntimeHandle` path from `src/runtime.ts`.
+- Ambient hooks (`event`, `tool.execute.after`, `session.idle`, `experimental.chat.system.transform`) must never throw into OpenCode. Catch synchronous failures and promise rejections, including delayed microtask work.
+- Ambient hooks should enqueue or skip work only. Do not run sidecar writes, hot DB scans, archive export, artifact ingest, embedding, classification, or retrieval directly from a hook body.
+- `experimental.chat.system.transform` must be best-effort and deadline-bound through `runtime.systemTransformDeadlineMs`. Use a shadow copy and only commit mutations when the work completes before the deadline.
+- The live plugin path must use `openMemoryDbLive` or equivalent short-timeout SQLite pragmas. Keep longer `openMemoryDb` maintenance timeouts for CLI, eval, repair, archive, and explicit maintenance workflows.
+- Degraded runtime responses must stay passive by default. Do not emit `suggestedNextSteps`, `<engram-hint>`, or `<project_memory>` from degraded paths unless `context.proactiveHints.enabled` explicitly gates that behavior.
+- Explicit tools may perform requested work, but they must return structured degraded/error output instead of throwing when runtime startup, SQLite, OpenAI, or filesystem access fails.
+- Add regression tests whenever changing runtime startup, hook dispatch, system transform injection, SQLite connection setup, or degraded tool behavior. Cover corrupt/locked sidecars, async hook failures, and deadline behavior.
+
 ## Native Plugin Tool Pattern
 
 `conflict_context` and `lifecycle_ingest` are the reference examples for adding a native plugin tool (as opposed to a CLI command). The pattern in `src/index.ts`:

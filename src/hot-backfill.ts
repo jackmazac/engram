@@ -1,48 +1,47 @@
-import { Database } from "bun:sqlite"
-import { ulid } from "ulid"
-import type { EngramConfig } from "./config.ts"
+import { Database } from "bun:sqlite";
+import { ulid } from "ulid";
+import type { EngramConfig } from "./config.ts";
 import {
   applyConnPragmas,
   createBackfillJob,
   finishBackfillJob,
   leaseBackfillJob,
-  readBackfillJob,
   updateBackfillJobProgress,
   type BackfillJobRow,
-} from "./db.ts"
-import { contentHash } from "./hash.ts"
+} from "./db.ts";
+import { contentHash } from "./hash.ts";
 
-export type BackfillStrategy = "artifact-linked" | "priority" | "recent" | "errors" | "patches"
+export type BackfillStrategy = "artifact-linked" | "priority" | "recent" | "errors" | "patches";
 export type HotBackfillSummary = {
-  dryRun: boolean
-  strategy: BackfillStrategy
-  roots: number
-  scannedParts: number
-  chunksInserted: number
-}
+  dryRun: boolean;
+  strategy: BackfillStrategy;
+  roots: number;
+  scannedParts: number;
+  chunksInserted: number;
+};
 
 export type HotBackfillJobResult = {
-  summary: HotBackfillSummary
-  job: BackfillJobRow
-}
+  summary: HotBackfillSummary;
+  job: BackfillJobRow;
+};
 
-type Root = { root_session_id: string; priority_score: number }
+type Root = { root_session_id: string; priority_score: number };
 
 export function backfillHot(opts: {
-  db: Database
-  hotPath: string
-  projectId: string
-  cfg: EngramConfig
-  strategy: BackfillStrategy
-  dryRun: boolean
-  maxRoots: number
-  maxParts: number
+  db: Database;
+  hotPath: string;
+  projectId: string;
+  cfg: EngramConfig;
+  strategy: BackfillStrategy;
+  dryRun: boolean;
+  maxRoots: number;
+  maxParts: number;
 }): HotBackfillSummary {
-  const roots = selectRoots(opts.db, opts.projectId, opts.strategy, opts.maxRoots)
-  const hot = new Database(opts.hotPath, { readonly: true })
-  applyConnPragmas(hot)
+  const roots = selectRoots(opts.db, opts.projectId, opts.strategy, opts.maxRoots);
+  const hot = new Database(opts.hotPath, { readonly: true });
+  applyConnPragmas(hot);
   try {
-    const candidates: Candidate[] = []
+    const candidates: Candidate[] = [];
     for (const root of roots) {
       for (const part of rootCandidates(
         hot,
@@ -52,56 +51,55 @@ export function backfillHot(opts: {
         opts.cfg.backfill.maxSessionsPerRoot,
         opts.maxParts - candidates.length,
       )) {
-        candidates.push(part)
-        if (candidates.length >= opts.maxParts) break
+        candidates.push(part);
+        if (candidates.length >= opts.maxParts) break;
       }
-      if (candidates.length >= opts.maxParts) break
+      if (candidates.length >= opts.maxParts) break;
     }
-    let inserted = 0
-    if (!opts.dryRun) inserted = insertCandidates(opts.db, opts.projectId, opts.cfg, candidates)
+    let inserted = 0;
+    if (!opts.dryRun) inserted = insertCandidates(opts.db, opts.projectId, opts.cfg, candidates);
     return {
       dryRun: opts.dryRun,
       strategy: opts.strategy,
       roots: roots.length,
       scannedParts: candidates.length,
       chunksInserted: inserted,
-    }
+    };
   } finally {
-    hot.close()
+    hot.close();
   }
 }
 
 export function runBackfillHotJob(opts: {
-  db: Database
-  hotPath: string
-  projectId: string
-  cfg: EngramConfig
-  strategy: BackfillStrategy
-  dryRun: boolean
-  maxRoots: number
-  maxParts: number
-  leaseOwner: string
-  leaseMs?: number
-  now?: number
+  db: Database;
+  hotPath: string;
+  projectId: string;
+  cfg: EngramConfig;
+  strategy: BackfillStrategy;
+  maxRoots: number;
+  maxParts: number;
+  leaseOwner: string;
+  leaseMs?: number;
+  now?: number;
 }): HotBackfillJobResult {
-  const now = opts.now ?? Date.now()
+  const now = opts.now ?? Date.now();
   const job = createBackfillJob(opts.db, {
     projectId: opts.projectId,
     kind: "hot",
     strategy: opts.strategy,
     cursor: null,
     now,
-  })
+  });
   const leased = leaseBackfillJob(opts.db, {
     jobId: job.id,
     leaseOwner: opts.leaseOwner,
     leaseMs: opts.leaseMs ?? 60_000,
     now,
-  })
-  if (!leased) throw new Error(`backfill job lease failed: ${job.id}`)
+  });
+  if (!leased) throw new Error(`backfill job lease failed: ${job.id}`);
 
   try {
-    const summary = backfillHot(opts)
+    const summary = backfillHot({ ...opts, dryRun: false });
     updateBackfillJobProgress(opts.db, {
       jobId: job.id,
       cursor: {
@@ -113,56 +111,49 @@ export function runBackfillHotJob(opts: {
       processedParts: summary.scannedParts,
       insertedChunks: summary.chunksInserted,
       now,
-    })
-    const finished = finishBackfillJob(opts.db, { jobId: job.id, status: "completed", now })
-    if (!finished) throw new Error(`backfill job finish failed: ${job.id}`)
-    return { summary, job: finished }
+    });
+    const finished = finishBackfillJob(opts.db, { jobId: job.id, status: "completed", now });
+    if (!finished) throw new Error(`backfill job finish failed: ${job.id}`);
+    return { summary, job: finished };
   } catch (error) {
     finishBackfillJob(opts.db, {
       jobId: job.id,
       status: "failed",
       errorSummary: error instanceof Error ? error.message : String(error),
       now,
-    })
-    const failed = readBackfillJob(opts.db, job.id)
-    if (failed) return { summary: emptySummary(opts), job: failed }
-    throw error
+    });
+    throw error;
   }
 }
 
 export function formatHotBackfillSummary(s: HotBackfillSummary): string {
-  return `Hot backfill ${s.dryRun ? "dry-run" : "applied"} strategy=${s.strategy} roots=${s.roots} scannedParts=${s.scannedParts} chunksInserted=${s.chunksInserted}`
-}
-
-function emptySummary(opts: { dryRun: boolean; strategy: BackfillStrategy }): HotBackfillSummary {
-  return {
-    dryRun: opts.dryRun,
-    strategy: opts.strategy,
-    roots: 0,
-    scannedParts: 0,
-    chunksInserted: 0,
-  }
+  return `Hot backfill ${s.dryRun ? "dry-run" : "applied"} strategy=${s.strategy} roots=${s.roots} scannedParts=${s.scannedParts} chunksInserted=${s.chunksInserted}`;
 }
 
 type Candidate = {
-  rootId: string
-  sessionId: string
-  messageId: string
-  partId: string
-  content: string
-  type: string
-  time: number
-  sourceKind: string
-  authority: number
-}
+  rootId: string;
+  sessionId: string;
+  messageId: string;
+  partId: string;
+  content: string;
+  type: string;
+  time: number;
+  sourceKind: string;
+  authority: number;
+};
 
-function selectRoots(db: Database, projectId: string, strategy: BackfillStrategy, maxRoots: number): Root[] {
+function selectRoots(
+  db: Database,
+  projectId: string,
+  strategy: BackfillStrategy,
+  maxRoots: number,
+): Root[] {
   if (strategy === "recent") {
     return db
       .prepare(
         `SELECT root_session_id, priority_score FROM session_root_index WHERE project_id = ? ORDER BY time_updated DESC LIMIT ?`,
       )
-      .all(projectId, maxRoots) as Root[]
+      .all(projectId, maxRoots) as Root[];
   }
   if (strategy === "artifact-linked") {
     const linked = db
@@ -179,14 +170,14 @@ function selectRoots(db: Database, projectId: string, strategy: BackfillStrategy
          ORDER BY r.priority_score DESC
          LIMIT ?`,
       )
-      .all(projectId, maxRoots) as Root[]
-    if (linked.length) return linked
+      .all(projectId, maxRoots) as Root[];
+    if (linked.length) return linked;
   }
   return db
     .prepare(
       `SELECT root_session_id, priority_score FROM session_root_index WHERE project_id = ? ORDER BY priority_score DESC LIMIT ?`,
     )
-    .all(projectId, maxRoots) as Root[]
+    .all(projectId, maxRoots) as Root[];
 }
 
 function rootCandidates(
@@ -197,7 +188,7 @@ function rootCandidates(
   maxSessions: number,
   limit: number,
 ): Candidate[] {
-  if (limit <= 0) return []
+  if (limit <= 0) return [];
   const sessions = hot
     .prepare(
       `WITH RECURSIVE t(id) AS (
@@ -205,10 +196,10 @@ function rootCandidates(
          UNION ALL SELECT s.id FROM session s INNER JOIN t ON s.parent_id = t.id
        ) SELECT id FROM t LIMIT ?`,
     )
-    .all(rootId, projectId, maxSessions) as { id: string }[]
-  const ids = sessions.map((s) => s.id)
-  if (ids.length === 0) return []
-  const placeholders = ids.map(() => "?").join(",")
+    .all(rootId, projectId, maxSessions) as { id: string }[];
+  const ids = sessions.map((s) => s.id);
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");
   const rows = hot
     .prepare(
       `SELECT p.id AS part_id, p.message_id, p.session_id, p.time_created, p.data AS part_data, m.data AS message_data
@@ -218,64 +209,72 @@ function rootCandidates(
        LIMIT ?`,
     )
     .all(...ids, Math.max(limit * 4, limit)) as {
-    part_id: string
-    message_id: string
-    session_id: string
-    time_created: number
-    part_data: string
-    message_data: string
-  }[]
-  const out: Candidate[] = []
+    part_id: string;
+    message_id: string;
+    session_id: string;
+    time_created: number;
+    part_data: string;
+    message_data: string;
+  }[];
+  const out: Candidate[] = [];
   for (const row of rows) {
-    const c = candidate(row, rootId, strategy)
-    if (!c) continue
-    out.push(c)
-    if (out.length >= limit) break
+    const c = candidate(row, rootId, strategy);
+    if (!c) continue;
+    out.push(c);
+    if (out.length >= limit) break;
   }
-  return out
+  return out;
 }
 
 function candidate(
   row: {
-    part_id: string
-    message_id: string
-    session_id: string
-    time_created: number
-    part_data: string
-    message_data: string
+    part_id: string;
+    message_id: string;
+    session_id: string;
+    time_created: number;
+    part_data: string;
+    message_data: string;
   },
   rootId: string,
   strategy: BackfillStrategy,
 ): Candidate | null {
-  let msg: { role?: string; agent?: string }
+  let msg: { role?: string; agent?: string };
   let part: {
-    type?: string
-    text?: string
-    tool?: string
-    state?: { status?: string; output?: string; error?: string }
-  }
+    type?: string;
+    text?: string;
+    tool?: string;
+    state?: { status?: string; output?: string; error?: string };
+  };
   try {
-    msg = JSON.parse(row.message_data) as { role?: string; agent?: string }
+    msg = JSON.parse(row.message_data) as { role?: string; agent?: string };
     part = JSON.parse(row.part_data) as {
-      type?: string
-      text?: string
-      tool?: string
-      state?: { status?: string; output?: string; error?: string }
-    }
+      type?: string;
+      text?: string;
+      tool?: string;
+      state?: { status?: string; output?: string; error?: string };
+    };
   } catch {
-    return null
+    return null;
   }
-  if (msg.role !== "assistant") return null
-  if (part.type === "text" && part.text?.trim()) return base(row, rootId, part.text, "discovery", "hot_text", 2)
+  if (msg.role !== "assistant") return null;
+  if (part.type === "text" && part.text?.trim())
+    return base(row, rootId, part.text, "discovery", "hot_text", 2);
   if (part.type === "patch")
-    return base(row, rootId, "Patch applied in implementation session.", "migration", "hot_patch", 5)
+    return base(
+      row,
+      rootId,
+      "Patch applied in implementation session.",
+      "migration",
+      "hot_patch",
+      5,
+    );
   if (part.type === "tool") {
-    const tool = part.tool ?? "tool"
-    const status = part.state?.status ?? "unknown"
-    if (status === "completed" && ["read", "grep", "glob"].includes(tool)) return null
-    if (strategy === "patches" && tool !== "apply_patch" && tool !== "edit") return null
-    if (strategy === "errors" && status !== "error") return null
-    const body = status === "error" ? (part.state?.error ?? "tool error") : `${tool} ${status}`
+    const tool = part.tool ?? "tool";
+    const status = part.state?.status ?? "unknown";
+    if (status === "completed" && ["read", "grep", "glob"].includes(tool)) return null;
+    if (strategy === "patches" && tool !== "apply_patch" && tool !== "edit") return null;
+    if (strategy === "errors" && status !== "error") return null;
+    const body = status === "error" ? (part.state?.error ?? "tool error") : `${tool} ${status}`;
     return base(
       row,
       rootId,
@@ -283,9 +282,9 @@ function candidate(
       status === "error" ? "bug" : "tool_trace",
       `hot_tool:${tool}`,
       status === "error" ? 5 : 1,
-    )
+    );
   }
-  return null
+  return null;
 }
 
 function base(
@@ -306,24 +305,29 @@ function base(
     time: row.time_created,
     sourceKind,
     authority,
-  }
+  };
 }
 
-function insertCandidates(db: Database, projectId: string, cfg: EngramConfig, candidates: Candidate[]): number {
-  let inserted = 0
-  const exists = db.prepare(`SELECT 1 FROM chunk WHERE project_id = ? AND source_ref = ? LIMIT 1`)
+function insertCandidates(
+  db: Database,
+  projectId: string,
+  cfg: EngramConfig,
+  candidates: Candidate[],
+): number {
+  let inserted = 0;
+  const exists = db.prepare(`SELECT 1 FROM chunk WHERE project_id = ? AND source_ref = ? LIMIT 1`);
   const stmt = db.prepare(
     `INSERT INTO chunk (
       id, session_id, message_id, part_id, project_id, role, agent, model, content_type, content,
       file_paths, tool_name, tool_status, output_head, output_tail, output_length, error_class,
       time_created, content_hash, root_session_id, session_depth, plan_slug, source_kind, source_ref, authority
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  )
+  );
   const tx = db.transaction(() => {
     for (const c of candidates) {
-      const h = contentHash(c.content)
-      const ref = `${c.sourceKind}:${c.partId}:${h}`
-      if (exists.get(projectId, ref)) continue
+      const h = contentHash(c.content);
+      const ref = `${c.sourceKind}:${c.partId}:${h}`;
+      if (exists.get(projectId, ref)) continue;
       stmt.run(
         ulid(),
         c.sessionId,
@@ -350,10 +354,10 @@ function insertCandidates(db: Database, projectId: string, cfg: EngramConfig, ca
         c.sourceKind,
         ref,
         c.authority,
-      )
-      inserted++
+      );
+      inserted++;
     }
-  })
-  tx()
-  return inserted
+  });
+  tx();
+  return inserted;
 }

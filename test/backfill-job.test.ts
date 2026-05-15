@@ -56,8 +56,9 @@ describe("backfill job state", () => {
     expect(progressed?.inserted_chunks).toBe(3);
 
     expect(cancelBackfillJob(db, { jobId: job.id, now: 400 })?.status).toBe("cancelled");
-    expect(leaseBackfillJob(db, { jobId: job.id, leaseOwner: "worker-2", leaseMs: 1_000, now: 500 }))
-      .toBeNull();
+    expect(
+      leaseBackfillJob(db, { jobId: job.id, leaseOwner: "worker-2", leaseMs: 1_000, now: 500 }),
+    ).toBeNull();
 
     const completed = createBackfillJob(db, {
       projectId: "p1",
@@ -66,8 +67,9 @@ describe("backfill job state", () => {
       cursor: null,
       now: 600,
     });
-    expect(finishBackfillJob(db, { jobId: completed.id, status: "completed", now: 700 })?.status)
-      .toBe("completed");
+    expect(
+      finishBackfillJob(db, { jobId: completed.id, status: "completed", now: 700 })?.status,
+    ).toBe("completed");
     expect(readBackfillJob(db, completed.id)?.time_finished).toBe(700);
 
     db.close();
@@ -108,7 +110,9 @@ describe("backfill job state", () => {
       .prepare(`INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)`)
       .run("m1", "root", JSON.stringify({ role: "assistant", agent: "worker" }));
     hot
-      .prepare(`INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)`)
+      .prepare(
+        `INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)`,
+      )
       .run("part-1", "m1", "root", 3, JSON.stringify({ type: "text", text: "job memory" }));
     hot.close();
 
@@ -120,7 +124,27 @@ describe("backfill job state", () => {
           reasoning_count, primary_agents_json, priority_score, status, content_hash, indexed_at
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
-      .run("idx", "p1", "root", "Root Backfill Job", 1, 2, 0, 1, 1, 1, 0, 0, 0, 0, "[]", 10, "indexed", "h", 4);
+      .run(
+        "idx",
+        "p1",
+        "root",
+        "Root Backfill Job",
+        1,
+        2,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        "[]",
+        10,
+        "indexed",
+        "h",
+        4,
+      );
 
     const result = runBackfillHotJob({
       db: memory,
@@ -128,7 +152,6 @@ describe("backfill job state", () => {
       projectId: "p1",
       cfg: defaultEngramConfig,
       strategy: "priority",
-      dryRun: false,
       maxRoots: 1,
       maxParts: 10,
       leaseOwner: "test-worker",
@@ -141,6 +164,49 @@ describe("backfill job state", () => {
     expect(result.job.processed_parts).toBe(1);
     expect(result.job.inserted_chunks).toBe(1);
     expect(result.job.time_finished).toBe(10);
+
+    memory.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("hot backfill job records failure and rethrows", () => {
+    const dir = path.join(os.tmpdir(), `engram-hot-job-fail-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const memory = openMemoryDb(path.join(dir, "memory.db"));
+    const hotPath = path.join(dir, "hot.db");
+    const hot = new Database(hotPath, { create: true });
+    applyConnPragmas(hot);
+    hot.exec(`CREATE TABLE unrelated (id TEXT PRIMARY KEY);`);
+    hot.close();
+
+    memory
+      .prepare(
+        `INSERT INTO session_root_index (
+          id, project_id, root_session_id, title, time_created, time_updated, child_count,
+          message_count, part_count, assistant_count, user_count, tool_count, patch_count,
+          reasoning_count, primary_agents_json, priority_score, status, content_hash, indexed_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run("idx", "p1", "root", "root", 1, 2, 0, 1, 1, 1, 0, 0, 0, 0, "[]", 10, "indexed", "h", 4);
+
+    expect(() =>
+      runBackfillHotJob({
+        db: memory,
+        hotPath,
+        projectId: "p1",
+        cfg: defaultEngramConfig,
+        strategy: "priority",
+        maxRoots: 1,
+        maxParts: 10,
+        leaseOwner: "test-worker",
+        now: 10,
+      }),
+    ).toThrow();
+    const row = memory
+      .prepare(`SELECT status, error_summary FROM backfill_job WHERE project_id = ?`)
+      .get("p1") as { status: string; error_summary: string | null };
+    expect(row.status).toBe("failed");
+    expect(row.error_summary).toBeTruthy();
 
     memory.close();
     rmSync(dir, { recursive: true, force: true });
@@ -186,7 +252,9 @@ describe("backfill job state", () => {
         .prepare(`INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)`)
         .run(`m-${id}`, id, JSON.stringify({ role: "assistant", agent: "worker" }));
       hot
-        .prepare(`INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)`)
+        .prepare(
+          `INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?,?,?,?,?)`,
+        )
         .run(`p-${id}`, `m-${id}`, id, 3, JSON.stringify({ type: "text", text: `memory ${id}` }));
     }
     hot.close();

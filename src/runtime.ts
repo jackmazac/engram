@@ -5,17 +5,22 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { EngramConfig } from "./config.ts";
-import { loadConfig } from "./config.ts";
+import { defaultEngramConfig, loadConfig } from "./config.ts";
 import { exportRootSession, staleRootIds } from "./archive.ts";
 import { backfillDone, backfillFromHot, markBackfillProgress } from "./backfill.ts";
-import { applyConnPragmas, insertChunkCorrelation, openMemoryDb, sidecarPath } from "./db.ts";
+import { applyConnPragmas, insertChunkCorrelation, openMemoryDbLive, sidecarPath } from "./db.ts";
 import * as capture from "./capture.ts";
 import { ingestArtifacts } from "./artifacts.ts";
 import { defaultHotDbPath } from "./paths.ts";
 import type { ChunkInsert, EngramCorrelation } from "./types.ts";
 import { embedTexts, resolveApiKey } from "./openai.ts";
 import { classifyBatch } from "./classify.ts";
-import { buildContextBundle, formatContextBundle, type ContextMode } from "./context.ts";
+import {
+  buildContextBundle,
+  formatContextBundle,
+  type ContextBundle,
+  type ContextMode,
+} from "./context.ts";
 import { correlationFromUnknown, correlationToDetail } from "./fleet.ts";
 import { EngramLogger, formatEventReport, recentLogEvents } from "./logger.ts";
 import { formatHits, searchMemory } from "./retrieve.ts";
@@ -36,14 +41,303 @@ type ProactiveMemoryHit = {
   session_id: string;
 };
 
-type RuntimeInput = {
+export type EngramRuntimeState = "starting" | "ready" | "degraded" | "disabled";
+
+export class EngramRuntimeHandle {
+  cfg: EngramConfig;
+
+  private runtime: EngramRuntime | null = null;
+  private startPromise: Promise<EngramRuntime | null> | null = null;
+  private state: EngramRuntimeState;
+  private startupError: string | null;
+  private closed = false;
+
+  constructor(
+    private input: RuntimeInput,
+    cfg: EngramConfig,
+    startupError?: unknown,
+  ) {
+    this.cfg = cfg;
+    this.startupError = startupError ? errorMessage(startupError) : null;
+    this.state = !cfg.enabled ? "disabled" : startupError ? "degraded" : "starting";
+    if (this.state === "starting") {
+      setTimeout(() => {
+        void this.ensureRuntime();
+      }, 0);
+    }
+  }
+
+  status() {
+    return {
+      state: this.state,
+      startupError: this.startupError,
+      queue: this.runtime?.runtimeQueueStats() ?? { pendingRows: 0, droppedRows: 0 },
+    };
+  }
+
+  close() {
+    this.closed = true;
+    this.runtime?.close();
+    this.runtime = null;
+    this.startPromise = null;
+    this.state = "disabled";
+  }
+
+  async ready(): Promise<EngramRuntime | null> {
+    return this.readyForTool();
+  }
+
+  onMessageUpdated(ev: { properties?: { info?: Record<string, unknown> } }) {
+    this.ambient("message.updated", (rt) => rt.onMessageUpdated(ev));
+  }
+
+  onPartUpdated(ev: { properties?: { part?: Record<string, unknown> } }) {
+    this.ambient("message.part.updated", (rt) => rt.onPartUpdated(ev));
+  }
+
+  onToolAfter(tool: string, sessionID: string, output: string, metadata?: unknown) {
+    this.ambient("tool.execute.after", (rt) => rt.onToolAfter(tool, sessionID, output, metadata));
+  }
+
+  onSessionIdle(ev: { properties?: { sessionID?: string } }) {
+    this.ambient("session.idle", (rt) => rt.onSessionIdle(ev));
+  }
+
+  async injectSystem(sessionID: string | undefined, system: string[]): Promise<void> {
+    const rt = this.runtime;
+    if (!rt || this.state !== "ready") return;
+    const shadow = [...system];
+    const completed = await withDeadline(
+      Promise.resolve()
+        .then(() => rt.injectSystem(sessionID, shadow))
+        .then(
+          () => true,
+          (error) => {
+            this.reportAmbientFailure("system.transform", error);
+            return false;
+          },
+        ),
+      this.cfg.runtime.systemTransformDeadlineMs,
+      false,
+    );
+    if (completed) system.splice(0, system.length, ...shadow);
+  }
+
+  async memoryTool(
+    query: string,
+    scope: string | undefined,
+    limit: number | undefined,
+    sessionID: string,
+    correlation?: EngramCorrelation | null,
+  ) {
+    const rt = await this.readyForTool();
+    if (!rt) return this.degradedText("memory");
+    try {
+      return await rt.memoryTool(query, scope, limit, sessionID, correlation);
+    } catch (error) {
+      return `Engram memory failed: ${errorMessage(error)}`;
+    }
+  }
+
+  async forgetTool(opts: Parameters<EngramRuntime["forgetTool"]>[0]) {
+    const rt = await this.readyForTool();
+    if (!rt) return this.degradedText("forget");
+    try {
+      return rt.forgetTool(opts);
+    } catch (error) {
+      return `Engram forget failed: ${errorMessage(error)}`;
+    }
+  }
+
+  async feedbackTool(opts: Parameters<EngramRuntime["feedbackTool"]>[0]) {
+    const rt = await this.readyForTool();
+    if (!rt) return this.degradedText("memory_feedback");
+    try {
+      return rt.feedbackTool(opts);
+    } catch (error) {
+      return `Engram feedback failed: ${errorMessage(error)}`;
+    }
+  }
+
+  async contextTool(opts: Parameters<EngramRuntime["contextTool"]>[0]) {
+    const rt = await this.readyForTool();
+    if (!rt) return this.degradedText("memory_context");
+    try {
+      return rt.contextTool(opts);
+    } catch (error) {
+      return `Engram context failed: ${errorMessage(error)}`;
+    }
+  }
+
+  async runConflictContext(opts: ConflictContextArgs) {
+    const rt = await this.readyForTool();
+    if (!rt) return degradedContextBundle(opts.query, contextMode(opts.mode), this.status());
+    try {
+      return rt.runConflictContext(opts);
+    } catch (error) {
+      return degradedContextBundle(opts.query, contextMode(opts.mode), {
+        ...this.status(),
+        startupError: errorMessage(error),
+      });
+    }
+  }
+
+  async runLifecycleIngest(opts: Parameters<EngramRuntime["runLifecycleIngest"]>[0]) {
+    const rt = await this.readyForTool();
+    if (!rt) return degradedLifecycleResult(this.status());
+    try {
+      return rt.runLifecycleIngest(opts);
+    } catch (error) {
+      return degradedLifecycleResult({ ...this.status(), startupError: errorMessage(error) });
+    }
+  }
+
+  async statsTool(report: string | undefined) {
+    const rt = await this.readyForTool();
+    if (!rt) {
+      const status = this.status();
+      return `Engram: ${status.state}${status.startupError ? ` (${status.startupError})` : ""}`;
+    }
+    try {
+      return rt.statsTool(report);
+    } catch (error) {
+      return `Engram stats failed: ${errorMessage(error)}`;
+    }
+  }
+
+  private ambient(name: string, fn: (rt: EngramRuntime) => unknown) {
+    const rt = this.runtime;
+    if (!rt || this.state !== "ready") return;
+    try {
+      const result = fn(rt);
+      if (isPromiseLike(result)) {
+        result.catch((error: unknown) => this.reportAmbientFailure(name, error));
+      }
+    } catch (error) {
+      this.reportAmbientFailure(name, error);
+    }
+  }
+
+  private async readyForTool(): Promise<EngramRuntime | null> {
+    if (this.runtime && this.state === "ready") return this.runtime;
+    return this.ensureRuntime();
+  }
+
+  private ensureRuntime(): Promise<EngramRuntime | null> {
+    if (this.closed) return Promise.resolve(null);
+    if (this.runtime && this.state === "ready") return Promise.resolve(this.runtime);
+    if (this.state === "disabled" || this.state === "degraded") return Promise.resolve(null);
+    if (!this.startPromise) {
+      this.startPromise = Promise.resolve()
+        .then(() => new EngramRuntime(this.input, this.cfg))
+        .then(
+          (runtime) => {
+            if (this.closed) {
+              runtime.close();
+              return null;
+            }
+            this.runtime = runtime;
+            this.state = "ready";
+            this.startupError = null;
+            return runtime;
+          },
+          (error) => {
+            if (this.closed) return null;
+            this.state = "degraded";
+            this.startupError = errorMessage(error);
+            this.reportAmbientFailure("startup", error);
+            return null;
+          },
+        );
+    }
+    return this.startPromise;
+  }
+
+  private degradedText(toolName: string): string {
+    const status = this.status();
+    return `Engram ${toolName} unavailable: runtime ${status.state}${status.startupError ? ` (${status.startupError})` : ""}.`;
+  }
+
+  private reportAmbientFailure(name: string, error: unknown) {
+    try {
+      process.stderr.write(`[engram] ${name} skipped: ${errorMessage(error)}\n`);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function withDeadline<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function degradedContextBundle(
+  query: string,
+  mode: ContextMode | undefined,
+  status: { state: EngramRuntimeState; startupError: string | null },
+): ContextBundle {
+  return {
+    query,
+    mode: mode ?? "plan",
+    generatedAt: new Date().toISOString(),
+    terms: [],
+    sections: [],
+    metrics: {
+      totalMs: 0,
+      termsCount: 0,
+      rootCandidates: 0,
+      artifactCandidates: 0,
+      distillationCandidates: 0,
+      chunkCandidates: 0,
+      correlatedCandidates: 0,
+      correlationHits: 0,
+      rankedCandidates: 0,
+      sections: 0,
+      items: 0,
+      budgetChars: 0,
+      usedChars: 0,
+      truncated: false,
+    },
+  };
+}
+
+function degradedLifecycleResult(status: {
+  state: EngramRuntimeState;
+  startupError: string | null;
+}) {
+  return {
+    applied: false,
+    discovered: 0,
+    ingested: 0,
+    skipped: 0,
+    artifact_refs: [] as string[],
+    lifecycle_object_ids: [] as string[],
+    errors: [`runtime ${status.state}${status.startupError ? `: ${status.startupError}` : ""}`],
+    run_id: null,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export type RuntimeInput = {
   client: {
     session: {
       messages(input: {
         path: { id: string };
         query: { directory: string; limit: number };
       }): Promise<{ data: unknown }>;
-      get(input: { path: { id: string }; query: { directory: string } }): Promise<{ data: unknown }>;
+      get(input: {
+        path: { id: string };
+        query: { directory: string };
+      }): Promise<{ data: unknown }>;
       status(input: { query: { directory: string } }): Promise<{
         data: Record<string, unknown> | undefined;
       }>;
@@ -158,7 +452,7 @@ export class EngramRuntime {
     this.cfg = cfg;
     const sp = sidecarPath(input.worktree, cfg);
     fs.mkdirSync(path.dirname(sp), { recursive: true });
-    this.db = openMemoryDb(sp);
+    this.db = openMemoryDbLive(sp);
     this.key = resolveApiKey(cfg.openaiApiKey);
     const d = this.db;
     this.logger = new EngramLogger(d, input.project.id, cfg.telemetry);
@@ -326,7 +620,13 @@ export class EngramRuntime {
     if (last?.ids.length) {
       const feedbackOutput =
         output.length > 20_000 ? `${output.slice(0, 10_000)}\n${output.slice(-10_000)}` : output;
-      queueMicrotask(() => this.feedbackHook(sessionID, tool, feedbackOutput));
+      queueMicrotask(() => {
+        try {
+          this.feedbackHook(sessionID, tool, feedbackOutput);
+        } catch (error) {
+          this.reportAsyncFailure("feedback_hook", error);
+        }
+      });
     }
   }
 
@@ -658,7 +958,8 @@ export class EngramRuntime {
       });
     }
     if (!key && this.memoryChunkCount() === 0) return "No matching memories found.";
-    if (!key) throw new Error("OPENAI_API_KEY or engram.openaiApiKey required for broad memory search");
+    if (!key)
+      throw new Error("OPENAI_API_KEY or engram.openaiApiKey required for broad memory search");
     const lim = limit ?? 5;
     const start = performance.now();
     const before = memorySnapshot();
@@ -921,16 +1222,16 @@ export class EngramRuntime {
     const start = performance.now();
     const before = memorySnapshot();
     const bundle = buildContextBundle({
-        db: this.db,
-        projectId: this.input.project.id,
-        query: opts.query,
-        limit: opts.limit ?? 12,
-        mode: opts.mode,
-        profile: "agent_read",
-        budgetChars: opts.budgetChars,
-        workspaceSignals: workspaceSignalsFromCorrelation(opts.correlation),
-        proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
-      });
+      db: this.db,
+      projectId: this.input.project.id,
+      query: opts.query,
+      limit: opts.limit ?? 12,
+      mode: opts.mode,
+      profile: "agent_read",
+      budgetChars: opts.budgetChars,
+      workspaceSignals: workspaceSignalsFromCorrelation(opts.correlation),
+      proactiveHintsEnabled: this.cfg.context.proactiveHints.enabled,
+    });
     this.recordMetric(
       "context.compile",
       "ok",
@@ -965,7 +1266,12 @@ export class EngramRuntime {
       bundle.metrics?.items ?? 0,
       null,
       before,
-      { queryLength: opts.query.length, mode: bundle.mode, conflictContext: true, ...bundle.metrics },
+      {
+        queryLength: opts.query.length,
+        mode: bundle.mode,
+        conflictContext: true,
+        ...bundle.metrics,
+      },
       opts.correlation,
     );
     return bundle;
@@ -1073,8 +1379,22 @@ Archives: ${arch.c} | export checkpoints: ${ck.c} | backfill_done: ${bf?.v ?? "0
 
   onSessionIdle(ev: { properties?: { sessionID?: string } }) {
     const sessionID = ev.properties?.sessionID;
-    void this.maybeArchive(sessionID);
+    void this.maybeArchive(sessionID).catch((error) =>
+      this.reportAsyncFailure("idle_archive", error),
+    );
     if (sessionID) this.pruneSessionState(sessionID);
+  }
+
+  private reportAsyncFailure(name: string, error: unknown) {
+    try {
+      this.logger.error("runtime", name, error, { action: "skip_async_work" });
+    } catch {
+      try {
+        process.stderr.write(`[engram] ${name} skipped: ${errorMessage(error)}\n`);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private pruneSessionState(sessionID: string) {
@@ -1210,18 +1530,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return isRecord(value) && typeof value.catch === "function";
+}
+
 function isCountRow(value: unknown): value is { c: number } {
   return isRecord(value) && typeof value.c === "number";
 }
 
-const runtimes = new Map<string, EngramRuntime>();
+const runtimes = new Map<string, EngramRuntimeHandle>();
 
-export function getRuntime(input: PluginInput): EngramRuntime {
+export function getRuntime(input: PluginInput): EngramRuntimeHandle {
   const key = `${input.worktree}\0${input.project.id}`;
   let r = runtimes.get(key);
   if (!r) {
-    const cfg = loadConfig(input.worktree);
-    r = new EngramRuntime(input, cfg);
+    let cfg = defaultEngramConfig;
+    let startupError: unknown;
+    try {
+      cfg = loadConfig(input.worktree);
+    } catch (error) {
+      startupError = error;
+    }
+    r = new EngramRuntimeHandle(input, cfg, startupError);
     runtimes.set(key, r);
   }
   return r;
